@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "attribute-lens"
+version = "0.1.0"
+description = "Tuned lens training for vision transformer interpretability"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "torchvision",
+    "timm>=1.0",
+    "pytorch-lightning>=2.0",
+    "optuna>=3.0",
+    "pyyaml",
+    "safetensors",
+    "tensorboard",
+    "pillow",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ipykernel"]
+
+[project.scripts]
+tuned-lens-train = "tuned_lens.scripts.train:main"
+prepare-imagenet = "tuned_lens.scripts.prepare_imagenet:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

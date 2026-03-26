@@ -1,0 +1,46 @@
+model:
+  model_name: "vit_large_patch14_clip_224.openai_ft_in1k"
+  pretrained: true
+  weights_path: null        # Optional: path to local .safetensors or .pt weights
+  target_layers: null       # null = all layers; or a list like [0, 6, 12, 18, 23]
+  freeze_model: true
+
+lens:
+  lens_type: "affine"       # "affine" | "mlp"
+  bias: true
+  mlp_hidden_dim: null      # Only used when lens_type=mlp; null defaults to d_model
+  mlp_num_layers: 2         # Only used when lens_type=mlp
+  init_from_head: false     # Initialize lens weights from the model's classification head
+  init_from_pretrained: null # Path to a saved lens dir/file for initialization
+  dropout: 0.0
+
+data:
+  imagenet_root: ""         # Path to extracted ImageNet (with train/ and val/ subdirs)
+  batch_size: 64
+  num_workers: 4
+  image_size: 224
+
+training:
+  lr: 1.0e-3
+  weight_decay: 0.0
+  optimizer: "adam"          # "adam" | "adamw" | "sgd"
+  scheduler: "cosine"       # "cosine" | "step" | "none"
+  warmup_steps: 100
+  max_epochs: 10
+  gradient_accumulation_steps: 1
+  loss_type: "kld"           # "kld" | "ce" | "combined"
+  ce_weight: 0.1             # Weight for CE when loss_type=combined
+  temperature: 1.0           # Temperature for softmax in KLD computation
+  grad_clip_norm: 1.0
+
+sweep:
+  n_trials: 50
+  max_epochs_per_trial: 3
+  lr_range: [1.0e-5, 1.0e-2]
+  batch_size_choices: [32, 64, 128]
+  optimizer_choices: ["adam", "adamw"]
+  weight_decay_range: [1.0e-6, 1.0e-2]
+  temperature_range: [0.5, 2.0]
+
+output_dir: "outputs/tuned_lens"
+seed: 42

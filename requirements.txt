@@ -1,0 +1,9 @@
+torch>=2.0
+torchvision
+timm>=1.0
+pytorch-lightning>=2.0
+optuna>=3.0
+pyyaml
+safetensors
+tensorboard
+pillow
