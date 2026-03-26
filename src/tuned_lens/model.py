@@ -66,6 +66,7 @@ class VisionModelWrapper:
         if self.config.freeze_model:
             for param in self.model.parameters():
                 param.requires_grad = False
+        self.model.to(self.device)
 
     def _register_hooks(self) -> None:
         """Register forward hooks to capture CLS tokens at target layers."""
