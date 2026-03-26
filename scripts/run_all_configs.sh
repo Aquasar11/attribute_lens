@@ -9,8 +9,24 @@ set -euo pipefail
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
-# Force Python stdout/stderr to be unbuffered so tee receives output line-by-line.
+# Force Python stdout/stderr to be unbuffered so output is written immediately.
 export PYTHONUNBUFFERED=1
+
+# Use 'script' to allocate a pseudo-TTY so Lightning's progress bar and ETA
+# render exactly as in an interactive single run. Falls back to plain tee if
+# 'script' is not available.
+_run_with_log() {
+    local cmd="$1"
+    local log="$2"
+    if command -v script &>/dev/null; then
+        # -q: suppress "Script started/ended" messages
+        # -e: exit with the command's exit code
+        # -c: command to run
+        script -q -e -c "${cmd}" "${log}"
+    else
+        eval "${cmd}" 2>&1 | tee "${log}"
+    fi
+}
 
 PYTHON="venv/bin/python"
 CONFIGS=(
@@ -46,9 +62,9 @@ for i in "${!CONFIGS[@]}"; do
 
     mkdir -p "${OUTPUT_DIR}"
 
-    if ${PYTHON} -m tuned_lens.scripts.train \
-        --config "${CONFIG}" \
-        2>&1 | tee "${LOG_FILE}"; then
+    if _run_with_log \
+        "${PYTHON} -m tuned_lens.scripts.train --config ${CONFIG}" \
+        "${LOG_FILE}"; then
         echo "  Status : DONE ($(date))"
     else
         echo "  Status : FAILED ($(date))"
