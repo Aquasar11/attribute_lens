@@ -4,3 +4,7 @@ tmp/
 CLAUDE.md
 __pycache__/
 *.pyc
+*.egg-info/
+dist/
+build/
+*.log

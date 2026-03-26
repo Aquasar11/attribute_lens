@@ -19,6 +19,7 @@ data:
   batch_size: 64
   num_workers: 4
   image_size: 224
+  max_images_per_class: null  # null = use all ~1300 images per class; set e.g. 500 to limit
 
 training:
   lr: 1.0e-3

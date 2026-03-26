@@ -72,6 +72,7 @@ class DataConfig:
     batch_size: int = 64
     num_workers: int = 4
     image_size: int = 224
+    max_images_per_class: int | None = None  # None = use all images
 
 
 @dataclass

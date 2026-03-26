@@ -254,6 +254,7 @@ All parameters in `configs/default.yaml`:
 | `data` | `imagenet_root` | `""` | Path to extracted ImageNet |
 | | `batch_size` | `64` | Training batch size |
 | | `num_workers` | `4` | DataLoader workers |
+| | `max_images_per_class` | `null` | Max training images per class (`null` = all ~1300); val set is always unaffected |
 | `training` | `lr` | `1e-3` | Learning rate |
 | | `weight_decay` | `0.0` | Weight decay |
 | | `optimizer` | `adam` | `adam`, `adamw`, or `sgd` |
