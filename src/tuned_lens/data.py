@@ -6,10 +6,14 @@ import os
 from collections import defaultdict
 from typing import Callable
 
+from PIL import ImageFile
 from torch.utils.data import DataLoader, Subset
 from torchvision.datasets import ImageFolder
 
 from .config import DataConfig
+
+# Allow PIL to load images that are slightly truncated rather than raising OSError.
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 def _subsample_per_class(dataset: ImageFolder, max_per_class: int) -> Subset:
