@@ -203,6 +203,27 @@ This runs Optuna trials searching over lr, batch size, optimizer, weight decay, 
 python -m tuned_lens.scripts.train --config outputs/tuned_lens/best_config.yaml
 ```
 
+### Evaluate lenses and plot per-layer accuracy
+
+After training, run this to measure how well each lens mimics the final model's predictions on the full val set and generate a bar chart:
+
+```bash
+python -m tuned_lens.scripts.eval_lens \
+  --lens-dir outputs/dry_run/best_lenses \
+  --config outputs/dry_run/config.yaml
+```
+
+Or without a saved config:
+
+```bash
+python -m tuned_lens.scripts.eval_lens \
+  --lens-dir outputs/dry_run/best_lenses \
+  --model-name vit_large_patch14_clip_224.openai_ft_in1k \
+  --imagenet-root /data/imagenet/extracted
+```
+
+The plot is saved to `<lens-dir>/accuracy.png` by default (override with `--output`). It shows per-layer accuracy defined as: fraction of val images where `argmax(lens_i(cls_i)) == argmax(model_final_logits)`.
+
 ### Monitor training
 
 ```bash
@@ -262,6 +283,7 @@ All parameters in `configs/default.yaml`:
 | | `warmup_steps` | `100` | LR warmup steps |
 | | `max_epochs` | `10` | Maximum training epochs |
 | | `gradient_accumulation_steps` | `1` | Gradient accumulation batches |
+| | `val_check_interval` | `1.0` | Validation frequency: float = fraction of epoch, int = every N steps |
 | | `loss_type` | `kld` | `kld`, `ce`, or `combined` |
 | | `ce_weight` | `0.1` | CE weight when `loss_type=combined` |
 | | `temperature` | `1.0` | Softmax temperature for KLD |

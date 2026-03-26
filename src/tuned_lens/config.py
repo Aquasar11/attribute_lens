@@ -85,6 +85,7 @@ class TrainingConfig:
     warmup_steps: int = 100
     max_epochs: int = 10
     gradient_accumulation_steps: int = 1
+    val_check_interval: int | float = 1.0  # int = every N steps, float = fraction of epoch
     loss_type: str = "kld"  # "kld" | "ce" | "combined"
     ce_weight: float = 0.1
     temperature: float = 1.0

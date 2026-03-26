@@ -8,3 +8,4 @@ pyyaml
 safetensors
 tensorboard
 pillow
+matplotlib

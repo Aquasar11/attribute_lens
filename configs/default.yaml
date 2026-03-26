@@ -29,6 +29,7 @@ training:
   warmup_steps: 100
   max_epochs: 10
   gradient_accumulation_steps: 1
+  val_check_interval: 1.0    # 1.0 = once per epoch; integer N = every N steps
   loss_type: "kld"           # "kld" | "ce" | "combined"
   ce_weight: 0.1             # Weight for CE when loss_type=combined
   temperature: 1.0           # Temperature for softmax in KLD computation

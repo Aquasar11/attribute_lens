@@ -113,6 +113,7 @@ def main() -> None:
         max_epochs=config.training.max_epochs,
         accumulate_grad_batches=config.training.gradient_accumulation_steps,
         gradient_clip_val=config.training.grad_clip_norm,
+        val_check_interval=config.training.val_check_interval,
         callbacks=[
             pl.callbacks.ModelCheckpoint(
                 dirpath=f"{config.output_dir}/checkpoints",
