@@ -62,6 +62,9 @@ def apply_overrides(config: TunedLensConfig, args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    import torch
+    torch.set_float32_matmul_precision("high")
+
     args = parse_args()
     config = TunedLensConfig.from_yaml(args.config)
     apply_overrides(config, args)
