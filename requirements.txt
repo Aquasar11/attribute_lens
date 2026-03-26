@@ -3,6 +3,7 @@ torchvision
 timm>=1.0
 pytorch-lightning>=2.0
 optuna>=3.0
+optuna-integration[pytorch_lightning]
 pyyaml
 safetensors
 tensorboard

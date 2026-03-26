@@ -7,7 +7,6 @@ import os
 
 import optuna
 import pytorch_lightning as pl
-from optuna.integration import PyTorchLightningPruningCallback
 
 from .config import TunedLensConfig
 from .data import create_imagenet_dataloaders
@@ -62,6 +61,11 @@ def create_objective(
 
         # Per-trial output dir
         config.output_dir = os.path.join(base_config.output_dir, "sweep", f"trial_{trial.number}")
+
+        try:
+            from optuna_integration.pytorch_lightning import PyTorchLightningPruningCallback
+        except ImportError:
+            from optuna.integration import PyTorchLightningPruningCallback
 
         module = TunedLensLightningModule(config)
 
