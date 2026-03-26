@@ -5,6 +5,13 @@
 
 set -euo pipefail
 
+# Use cached HuggingFace models — avoids any network requests to HF Hub.
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+# Force Python stdout/stderr to be unbuffered so tee receives output line-by-line.
+export PYTHONUNBUFFERED=1
+
 PYTHON="venv/bin/python"
 CONFIGS=(
     "configs/affine_kld.yaml"

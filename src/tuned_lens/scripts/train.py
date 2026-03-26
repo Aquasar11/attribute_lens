@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 import pytorch_lightning as pl
 
@@ -11,6 +12,54 @@ from tuned_lens.data import create_imagenet_dataloaders
 from tuned_lens.model import VisionModelWrapper
 from tuned_lens.sweep import run_sweep
 from tuned_lens.trainer import TunedLensLightningModule
+
+
+class _EpochLogger(pl.Callback):
+    """Prints plain newline-terminated progress lines to stdout.
+
+    Works correctly when stdout is piped (e.g. tee to a log file),
+    unlike Lightning's rich progress bar which uses carriage returns.
+
+    Prints a step-level update every LOG_EVERY_N_STEPS steps and a
+    full summary at the end of each train/val epoch.
+    """
+
+    LOG_EVERY_N_STEPS = 500
+
+    def on_train_batch_end(
+        self, trainer: pl.Trainer, pl_module: pl.LightningModule, outputs: object, batch: object, batch_idx: int
+    ) -> None:
+        if (batch_idx + 1) % self.LOG_EVERY_N_STEPS != 0:
+            return
+        m = trainer.callback_metrics
+        step_loss = m.get("train/loss_avg_step", float("nan"))
+        total_steps = trainer.num_training_batches
+        print(
+            f"[Epoch {trainer.current_epoch + 1}/{trainer.max_epochs}  "
+            f"step {batch_idx + 1}/{total_steps}] "
+            f"train_loss={step_loss:.4f}",
+            flush=True,
+        )
+
+    def on_train_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        m = trainer.callback_metrics
+        train_loss = m.get("train/loss_avg_epoch", float("nan"))
+        print(
+            f"[Epoch {trainer.current_epoch + 1}/{trainer.max_epochs}] "
+            f"train_loss_epoch={train_loss:.4f}",
+            flush=True,
+        )
+
+    def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
+        if trainer.sanity_checking:
+            return
+        m = trainer.callback_metrics
+        val_loss = m.get("val/loss_avg", float("nan"))
+        print(
+            f"[Epoch {trainer.current_epoch + 1}/{trainer.max_epochs}] "
+            f"val_loss={val_loss:.4f}",
+            flush=True,
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -129,12 +178,14 @@ def main() -> None:
                 patience=5,
                 mode="min",
             ),
+            _EpochLogger(),
         ],
         logger=pl.loggers.TensorBoardLogger(
             save_dir=config.output_dir,
             name="tensorboard",
         ),
         precision="16-mixed",
+        enable_progress_bar=sys.stdout.isatty(),  # only show progress bar in interactive terminals
     )
 
     trainer.fit(module, train_dataloaders=train_loader, val_dataloaders=val_loader)
