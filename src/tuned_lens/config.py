@@ -86,7 +86,8 @@ class TrainingConfig:
     max_epochs: int = 10
     gradient_accumulation_steps: int = 1
     val_check_interval: int | float = 1.0  # int = every N steps, float = fraction of epoch
-    loss_type: str = "kld"  # "kld" | "ce" | "combined"
+    loss_type: str = "kld"      # "kld" | "ce" | "combined"
+    ce_target: str = "model"    # "model" = model's argmax; "gt" = ground truth label
     ce_weight: float = 0.1
     temperature: float = 1.0
     grad_clip_norm: float = 1.0

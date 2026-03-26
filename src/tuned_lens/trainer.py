@@ -54,7 +54,7 @@ class TunedLensLightningModule(pl.LightningModule):
         self.model_wrapper.to(self.device)
 
     def _compute_loss(self, batch: tuple[torch.Tensor, torch.Tensor], stage: str) -> torch.Tensor:
-        images, labels = batch
+        images, gt_labels = batch
 
         # Extract hidden states from frozen backbone (no gradients)
         hidden_states, target_logits = self.model_wrapper.extract(images)
@@ -66,7 +66,8 @@ class TunedLensLightningModule(pl.LightningModule):
             cls_token = hidden_states[layer_idx].to(self.device)
             lens_logits = self.lens_bank(layer_idx, cls_token)
 
-            layer_loss = self.loss_fn(lens_logits, target_logits.detach(), labels)
+            # gt_labels is only used when loss_type in (ce, combined) and ce_target="gt"
+            layer_loss = self.loss_fn(lens_logits, target_logits.detach(), gt_labels)
 
             self.log(f"{stage}/loss_layer_{layer_idx}", layer_loss, on_step=False, on_epoch=True)
             total_loss = total_loss + layer_loss
