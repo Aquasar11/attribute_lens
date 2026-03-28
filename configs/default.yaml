@@ -24,8 +24,8 @@ data:
 training:
   lr: 1.0e-3
   weight_decay: 0.0
-  optimizer: "adam"          # "adam" | "adamw" | "sgd"
-  scheduler: "cosine"       # "cosine" | "step" | "none"
+  optimizer: "adam"          # "adam" | "adamw" | "sgd" | "rmsprop" | "nadam"
+  scheduler: "cosine"       # "cosine" | "cosine_warmup" | "step" | "exponential" | "linear" | "plateau" | "none"
   warmup_steps: 100
   max_epochs: 10
   gradient_accumulation_steps: 1
@@ -41,7 +41,8 @@ sweep:
   max_epochs_per_trial: 3
   lr_range: [1.0e-5, 1.0e-2]
   batch_size_choices: [32, 64, 128]
-  optimizer_choices: ["adam", "adamw"]
+  optimizer_choices: ["adam", "adamw", "sgd", "rmsprop", "nadam"]
+  scheduler_choices: ["cosine", "cosine_warmup", "step", "exponential", "linear", "plateau", "none"]
   weight_decay_range: [1.0e-6, 1.0e-2]
   temperature_range: [0.5, 2.0]
 

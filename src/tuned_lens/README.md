@@ -302,8 +302,8 @@ All parameters in `configs/default.yaml`:
 | | `max_images_per_class` | `null` | Max training images per class (`null` = all ~1300); val set is always unaffected |
 | `training` | `lr` | `1e-3` | Learning rate |
 | | `weight_decay` | `0.0` | Weight decay |
-| | `optimizer` | `adam` | `adam`, `adamw`, or `sgd` |
-| | `scheduler` | `cosine` | `cosine`, `step`, or `none` |
+| | `optimizer` | `adam` | `adam`, `adamw`, `sgd`, `rmsprop`, `nadam` |
+| | `scheduler` | `cosine` | `cosine`, `cosine_warmup`, `step`, `exponential`, `linear`, `plateau`, `none` |
 | | `warmup_steps` | `100` | LR warmup steps |
 | | `max_epochs` | `10` | Maximum training epochs |
 | | `gradient_accumulation_steps` | `1` | Gradient accumulation batches |
@@ -314,3 +314,5 @@ All parameters in `configs/default.yaml`:
 | | `grad_clip_norm` | `1.0` | Gradient clipping norm |
 | `sweep` | `n_trials` | `50` | Number of Optuna trials |
 | | `max_epochs_per_trial` | `3` | Epochs per sweep trial |
+| | `optimizer_choices` | all 5 | Optimizers Optuna can pick from |
+| | `scheduler_choices` | all 7 | Schedulers Optuna can pick from |

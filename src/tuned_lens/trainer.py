@@ -108,26 +108,40 @@ class TunedLensLightningModule(pl.LightningModule):
             opt = torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
         elif cfg.optimizer == "sgd":
             opt = torch.optim.SGD(params, lr=cfg.lr, weight_decay=cfg.weight_decay, momentum=0.9)
+        elif cfg.optimizer == "rmsprop":
+            opt = torch.optim.RMSprop(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
+        elif cfg.optimizer == "nadam":
+            opt = torch.optim.NAdam(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
         else:  # adam
             opt = torch.optim.Adam(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
         if cfg.scheduler == "cosine":
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.max_epochs)
-            return {
-                "optimizer": opt,
-                "lr_scheduler": {
-                    "scheduler": scheduler,
-                    "interval": "epoch",
-                },
-            }
+        elif cfg.scheduler == "cosine_warmup":
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(opt, T_0=max(1, cfg.max_epochs // 3))
         elif cfg.scheduler == "step":
             scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=3, gamma=0.1)
+        elif cfg.scheduler == "exponential":
+            scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=0.9)
+        elif cfg.scheduler == "linear":
+            scheduler = torch.optim.lr_scheduler.LinearLR(opt, start_factor=1.0, end_factor=0.1, total_iters=cfg.max_epochs)
+        elif cfg.scheduler == "plateau":
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=2)
             return {
                 "optimizer": opt,
                 "lr_scheduler": {
                     "scheduler": scheduler,
+                    "monitor": "val/loss_avg",
                     "interval": "epoch",
                 },
             }
+        else:  # none
+            return opt
 
-        return opt
+        return {
+            "optimizer": opt,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch",
+            },
+        }

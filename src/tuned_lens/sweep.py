@@ -49,6 +49,9 @@ def create_objective(
         config.training.optimizer = trial.suggest_categorical(
             "optimizer", sweep.optimizer_choices
         )
+        config.training.scheduler = trial.suggest_categorical(
+            "scheduler", sweep.scheduler_choices
+        )
         config.training.weight_decay = trial.suggest_float(
             "weight_decay", sweep.weight_decay_range[0], sweep.weight_decay_range[1], log=True
         )

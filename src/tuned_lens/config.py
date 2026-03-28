@@ -100,7 +100,8 @@ class SweepConfig:
     max_epochs_per_trial: int = 3
     lr_range: list[float] = field(default_factory=lambda: [1e-5, 1e-2])
     batch_size_choices: list[int] = field(default_factory=lambda: [32, 64, 128])
-    optimizer_choices: list[str] = field(default_factory=lambda: ["adam", "adamw"])
+    optimizer_choices: list[str] = field(default_factory=lambda: ["adam", "adamw", "sgd", "rmsprop", "nadam"])
+    scheduler_choices: list[str] = field(default_factory=lambda: ["cosine", "cosine_warmup", "step", "exponential", "linear", "plateau", "none"])
     weight_decay_range: list[float] = field(default_factory=lambda: [1e-6, 1e-2])
     temperature_range: list[float] = field(default_factory=lambda: [0.5, 2.0])
 
