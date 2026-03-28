@@ -224,6 +224,30 @@ python -m tuned_lens.scripts.eval_lens \
 
 The plot is saved to `<lens-dir>/accuracy.png` by default (override with `--output`). It shows per-layer accuracy defined as: fraction of val images where `argmax(lens_i(cls_i)) == argmax(model_final_logits)`.
 
+### Compare tuned lens vs logit lens
+
+`eval_lens_comparison.py` compares the **tuned lens** (your trained probe) against the **logit lens** (the frozen model's own classification head applied directly to intermediate CLS tokens — no learned parameters). Two accuracy metrics are plotted side by side for each layer:
+
+1. **vs Ground Truth** — argmax of each lens's output compared to the true ImageNet label
+2. **vs Model Prediction (ŷ)** — argmax compared to the final model's prediction
+
+```bash
+python -m tuned_lens.scripts.eval_lens_comparison \
+  --lens-dir outputs/affine_kld/best_lenses \
+  --config outputs/affine_kld/config.yaml
+```
+
+Or with explicit model/data args:
+
+```bash
+python -m tuned_lens.scripts.eval_lens_comparison \
+  --lens-dir outputs/affine_kld/best_lenses \
+  --model-name vit_large_patch14_clip_224.openai_ft_in1k \
+  --imagenet-root /data/imagenet/extracted
+```
+
+The output plot is saved to `<lens-dir>/comparison.png` (override with `--output`). A table with all four accuracy columns per layer is also printed to stdout.
+
 ### Monitor training
 
 ```bash
