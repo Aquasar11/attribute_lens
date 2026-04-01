@@ -105,6 +105,7 @@ class LensBank(nn.Module):
         num_classes: int,
         head_weight: torch.Tensor | None = None,
         head_bias: torch.Tensor | None = None,
+        patch_neighbor_size: int = 1,
     ) -> LensBank:
         """Factory method to create a LensBank.
 
@@ -118,11 +119,14 @@ class LensBank(nn.Module):
         """
         lenses: dict[int, BaseLens] = {}
 
+        # When training on patch neighborhoods, input to each lens is k*k*d_model
+        lens_in = d_model * patch_neighbor_size * patch_neighbor_size
+
         for layer_idx in target_layers:
             if config.lens_type == "mlp":
                 hidden_dim = config.mlp_hidden_dim or d_model
                 lens = MLPLens(
-                    d_model=d_model,
+                    d_model=lens_in,
                     num_classes=num_classes,
                     hidden_dim=hidden_dim,
                     num_layers=config.mlp_num_layers,
@@ -130,7 +134,7 @@ class LensBank(nn.Module):
                 )
             else:  # affine
                 lens = AffineLens(
-                    d_model=d_model,
+                    d_model=lens_in,
                     num_classes=num_classes,
                     bias=config.bias,
                 )

@@ -79,8 +79,13 @@ class VisionModelWrapper:
 
     def _make_hook(self, layer_idx: int) -> Any:
         def hook_fn(module: nn.Module, input: Any, output: torch.Tensor) -> None:
-            # output shape: [B, seq_len, d_model] — capture CLS at position 0
-            self._hidden_states[layer_idx] = output[:, 0, :].detach()
+            # output shape: [B, seq_len, d_model]
+            if self.config.patch_mode:
+                # Capture all patch tokens (exclude CLS at position 0)
+                self._hidden_states[layer_idx] = output[:, 1:, :].detach()
+            else:
+                # Capture CLS token only
+                self._hidden_states[layer_idx] = output[:, 0, :].detach()
         return hook_fn
 
     def _remove_hooks(self) -> None:
@@ -92,6 +97,30 @@ class VisionModelWrapper:
         self.device = str(device)
         self.model.to(device)
         return self
+
+    @property
+    def patch_grid_size(self) -> tuple[int, int]:
+        """Return (H, W) patch grid dimensions, e.g. (16, 16) for ViT-L/14 on 224×224."""
+        return self.model.patch_embed.grid_size
+
+    @torch.no_grad()
+    def extract_patches(self, images: torch.Tensor) -> tuple[dict[int, torch.Tensor], torch.Tensor]:
+        """Run forward pass in patch_mode, returning per-layer patch tensors.
+
+        Must be called when the wrapper was created with ``config.patch_mode=True``.
+
+        Returns:
+            patch_states: {layer_idx: [B, H, W, d_model]} reshaped patch tokens.
+            target_logits: Final model output [B, num_classes].
+        """
+        self._hidden_states.clear()
+        logits = self.model(images)
+        H, W = self.patch_grid_size
+        patches = {
+            k: v.reshape(v.shape[0], H, W, v.shape[-1])
+            for k, v in self._hidden_states.items()
+        }
+        return patches, logits
 
     @torch.no_grad()
     def extract(self, images: torch.Tensor) -> tuple[dict[int, torch.Tensor], torch.Tensor]:

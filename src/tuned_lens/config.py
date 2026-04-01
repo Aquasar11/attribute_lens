@@ -51,6 +51,7 @@ class ModelConfig:
     weights_path: str | None = None
     target_layers: list[int] | None = None  # None = all layers
     freeze_model: bool = True
+    patch_mode: bool = False  # capture all patch tokens instead of CLS token
 
 
 @dataclass
@@ -63,6 +64,9 @@ class LensConfig:
     init_from_head: bool = False
     init_from_pretrained: str | None = None  # Path to a saved lens .pt file
     dropout: float = 0.0
+    use_patch_tokens: bool = False   # train on patch tokens instead of CLS token
+    patch_neighbor_size: int = 3     # k — each patch sees a k×k neighborhood (must be odd)
+    patch_border: int = 2            # exclude this many patch-rows/cols from each edge
 
 
 @dataclass

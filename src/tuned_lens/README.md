@@ -191,6 +191,30 @@ python -m tuned_lens.scripts.train --config configs/my_run.yaml \
   --output-dir outputs/head_init_run
 ```
 
+### Patch lens training
+
+Instead of using the CLS token, train lenses on every patch token in the image center. Each patch's input is a k×k neighborhood of surrounding patch embeddings concatenated together.
+
+```bash
+python -m tuned_lens.scripts.train --config configs/my_run.yaml \
+  --use-patch-tokens \
+  --patch-neighbor-size 3 \
+  --patch-border 2 \
+  --output-dir outputs/patch_run
+```
+
+Or set it permanently in your config:
+
+```yaml
+lens:
+  use_patch_tokens: true
+  patch_neighbor_size: 3   # each patch sees a 3×3 = 9 patch neighborhood
+  patch_border: 2          # skip the outer 2 patch-rows/cols on each side
+```
+
+For ViT-L/14 (16×16 patches), `patch_border=2` means 12×12=144 valid patches are used per image per step.
+The constraint `patch_neighbor_size // 2 <= patch_border` should hold — otherwise a warning is shown and edge neighborhoods will include zero-padded regions.
+
 ### Hyperparameter sweep
 
 ```bash
@@ -289,6 +313,7 @@ All parameters in `configs/default.yaml`:
 | | `weights_path` | `null` | Local `.safetensors` or `.pt` path (overrides pretrained download) |
 | | `target_layers` | `null` | Layer indices to probe; `null` = all layers |
 | | `freeze_model` | `true` | Freeze backbone (always true for tuned lens) |
+| | `patch_mode` | `false` | Auto-set to `true` when `use_patch_tokens=true` |
 | `lens` | `lens_type` | `affine` | `affine` (single linear) or `mlp` |
 | | `bias` | `true` | Include bias in linear layers |
 | | `mlp_hidden_dim` | `null` | MLP hidden dim; `null` defaults to `d_model` |
@@ -296,6 +321,9 @@ All parameters in `configs/default.yaml`:
 | | `init_from_head` | `false` | Initialize lens from model's classification head |
 | | `init_from_pretrained` | `null` | Path to saved lens weights for initialization |
 | | `dropout` | `0.0` | Dropout rate (MLP only) |
+| | `use_patch_tokens` | `false` | Train on patch token neighborhoods instead of CLS token |
+| | `patch_neighbor_size` | `3` | k for k×k neighborhood; lens input dim = k²×d_model |
+| | `patch_border` | `2` | Exclude patches within this many steps of the image edge |
 | `data` | `imagenet_root` | `""` | Path to extracted ImageNet |
 | | `batch_size` | `64` | Training batch size |
 | | `num_workers` | `4` | DataLoader workers |

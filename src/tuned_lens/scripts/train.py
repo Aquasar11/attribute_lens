@@ -81,6 +81,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lens-type", type=str, choices=["affine", "mlp"], default=None)
     parser.add_argument("--init-from-head", action="store_true", default=None)
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--use-patch-tokens", action="store_true", default=None,
+                        help="Train on patch token neighborhoods instead of CLS token")
+    parser.add_argument("--patch-neighbor-size", type=int, default=None,
+                        help="k for k×k patch neighborhood input (must be odd, default 3)")
+    parser.add_argument("--patch-border", type=int, default=None,
+                        help="Exclude patches within this many steps of the image edge (default 2)")
     return parser.parse_args()
 
 
@@ -108,6 +114,12 @@ def apply_overrides(config: TunedLensConfig, args: argparse.Namespace) -> None:
         config.lens.init_from_head = True
     if args.seed is not None:
         config.seed = args.seed
+    if args.use_patch_tokens is True:
+        config.lens.use_patch_tokens = True
+    if args.patch_neighbor_size is not None:
+        config.lens.patch_neighbor_size = args.patch_neighbor_size
+    if args.patch_border is not None:
+        config.lens.patch_border = args.patch_border
 
 
 def main() -> None:
@@ -132,6 +144,8 @@ def main() -> None:
                 best_config.data.batch_size = v
             elif k == "optimizer":
                 best_config.training.optimizer = v
+            elif k == "scheduler":
+                best_config.training.scheduler = v
             elif k == "weight_decay":
                 best_config.training.weight_decay = v
             elif k == "temperature":
