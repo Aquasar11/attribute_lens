@@ -30,19 +30,15 @@ _run_with_log() {
 
 PYTHON="venv/bin/python"
 CONFIGS=(
-    "configs/affine_kld.yaml"
-    "configs/affine_ce.yaml"
-    "configs/affine_combined.yaml"
-    "configs/mlp_kld.yaml"
-    "configs/mlp_ce.yaml"
-    "configs/mlp_combined.yaml"
+    "configs/patch_affine_kld.yaml"
+    "configs/patch_mlp_kld.yaml"
 )
 
 TOTAL=${#CONFIGS[@]}
 FAILED=()
 
 echo "======================================================"
-echo " Tuned lens sweep: ${TOTAL} configs"
+echo " Patch lens training: ${TOTAL} configs"
 echo " Started: $(date)"
 echo "======================================================"
 

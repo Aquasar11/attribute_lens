@@ -1,0 +1,54 @@
+model:
+  model_name: "vit_large_patch14_clip_224.openai_ft_in1k"
+  pretrained: true
+  weights_path: null
+  target_layers: null
+  freeze_model: true
+  patch_mode: true
+
+lens:
+  lens_type: "affine"
+  bias: true
+  mlp_hidden_dim: null
+  mlp_num_layers: 2
+  init_from_head: false
+  init_from_pretrained: null
+  dropout: 0.0
+  use_patch_tokens: true
+  patch_neighbor_size: 3    # 3×3 neighborhood → lens input = 9 × d_model
+  patch_border: 2           # skip outer 2 patch-rows/cols; 12×12 valid patches per image
+
+data:
+  imagenet_root: "/opt/models/datasets/imagenet/extracted"
+  batch_size: 512
+  num_workers: 4
+  image_size: 224
+  max_images_per_class: null
+
+training:
+  lr: 1.0e-3
+  weight_decay: 0.0
+  optimizer: "adamw"
+  scheduler: "cosine"
+  warmup_steps: 100
+  max_epochs: 30
+  gradient_accumulation_steps: 1
+  val_check_interval: 1.0
+  loss_type: "kld"
+  ce_target: "model"
+  ce_weight: 0.1
+  temperature: 1.0
+  grad_clip_norm: 1.0
+
+sweep:
+  n_trials: 50
+  max_epochs_per_trial: 3
+  lr_range: [1.0e-5, 1.0e-2]
+  batch_size_choices: [32, 64, 128]
+  optimizer_choices: ["adam", "adamw"]
+  scheduler_choices: ["cosine", "cosine_warmup", "step", "exponential", "linear", "plateau", "none"]
+  weight_decay_range: [1.0e-6, 1.0e-2]
+  temperature_range: [0.5, 2.0]
+
+output_dir: "outputs/patch_affine_kld"
+seed: 42
