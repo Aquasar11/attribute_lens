@@ -96,15 +96,19 @@ class CLSLensScorer:
 
     For each patch position p at layer L::
 
-        adjusted[p] = h[p] - mean_token[L][p] + mean_cls[L]
+        adjusted[p] = h[p] - mean_patch[L][p] + mean_cls[L]
         score[p]    = softmax(cls_lens_L(adjusted[p]))[y_hat]
 
     Args:
         cls_lens_dir: Directory with ``layer_{idx}.pt`` CLS lens checkpoints.
-        means_path: Path to a ``.pt`` file with keys:
-            - ``cls_means``: ``dict[int, Tensor[d_model]]`` — mean CLS embedding per layer.
-            - ``token_means``: ``dict[int, Tensor[H*W, d_model]]`` — mean patch token per position per layer.
-        target_layers: Layer indices to score. Must be a subset of available lens files.
+        means_path: Path to the ``token_mean_embeddings.pt`` file produced by the
+            ``token_embedding_analysis`` notebook.  Expected keys:
+
+            - ``mean_cls``     : ``Tensor[L, d_model]``       — mean CLS embedding per layer.
+            - ``mean_patch``   : ``Tensor[L, H, W, d_model]`` — mean patch embedding per position per layer.
+            - ``target_layers``: ``list[int]``                 — layer indices corresponding to axis 0.
+
+        target_layers: Layer indices to score. Must be a subset of the layers in the means file.
         device: Torch device string.
     """
 
@@ -128,21 +132,32 @@ class CLSLensScorer:
                 )
             self.lenses[idx] = load_lens_checkpoint(available[idx], device=device)
 
-        # Load precomputed means
-        means = torch.load(means_path, map_location="cpu", weights_only=False)
-        self.cls_means: dict[int, torch.Tensor] = {
-            int(k): v.to(device) for k, v in means["cls_means"].items()
-        }
-        self.token_means: dict[int, torch.Tensor] = {
-            int(k): v.to(device) for k, v in means["token_means"].items()
-        }
+        # Load precomputed means produced by token_embedding_analysis.ipynb
+        # Structure: mean_cls [L, d_model], mean_patch [L, H, W, d_model], target_layers list[int]
+        data = torch.load(means_path, map_location="cpu", weights_only=False)
+        stored_layers: list[int] = data["target_layers"]
+        mean_cls_stacked: torch.Tensor = data["mean_cls"]     # [L, d_model]
+        mean_patch_stacked: torch.Tensor = data["mean_patch"] # [L, H, W, d_model]
 
-        # Validate means are available for all requested layers
+        # Build per-layer dicts keyed by layer index
+        layer_to_pos = {l: i for i, l in enumerate(stored_layers)}
+
+        self.cls_means: dict[int, torch.Tensor] = {}
+        self.token_means: dict[int, torch.Tensor] = {}
+
         for idx in target_layers:
-            if idx not in self.cls_means:
-                raise KeyError(f"cls_means missing for layer {idx} in {means_path}")
-            if idx not in self.token_means:
-                raise KeyError(f"token_means missing for layer {idx} in {means_path}")
+            if idx not in layer_to_pos:
+                raise KeyError(
+                    f"Layer {idx} not found in means file {means_path}. "
+                    f"Available layers: {stored_layers}"
+                )
+            pos = layer_to_pos[idx]
+            self.cls_means[idx] = mean_cls_stacked[pos].to(device)          # [d_model]
+            H_p, W_p, d = mean_patch_stacked[pos].shape
+            # Flatten spatial dims so token_means[idx] is [H*W, d_model]
+            self.token_means[idx] = (
+                mean_patch_stacked[pos].reshape(H_p * W_p, d).to(device)
+            )
 
     @torch.no_grad()
     def score_all_layers(
