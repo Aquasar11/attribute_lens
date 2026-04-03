@@ -25,8 +25,14 @@ def _score_map_to_rgba(
 ) -> np.ndarray:
     """Convert a [H, W] score map to an RGBA image [H, W, 4].
 
-    NaN positions are made fully transparent.  All other positions are
-    mapped through the colormap and blended with ``alpha``.
+    Alpha is **proportional to the normalised score**, so low-scoring patches
+    fade to transparent and only high-scoring patches are prominently coloured.
+    NaN positions are fully transparent.
+
+    Args:
+        score_map_np: Float array, NaN allowed.
+        colormap: Matplotlib colormap name.
+        alpha: Maximum opacity applied to the highest-scoring patch.
     """
     cmap = plt.get_cmap(colormap)
     nan_mask = np.isnan(score_map_np)
@@ -42,9 +48,9 @@ def _score_map_to_rgba(
     else:
         normalised = np.zeros_like(score_map_np)
 
-    rgba = cmap(normalised)          # [H, W, 4]
-    rgba[..., 3] = alpha             # set alpha
-    rgba[nan_mask, 3] = 0.0          # NaN → fully transparent
+    rgba = cmap(normalised)                    # [H, W, 4], colours from colormap
+    rgba[..., 3] = normalised * alpha          # alpha ∝ score: low score → transparent
+    rgba[nan_mask, 3] = 0.0                    # NaN (border) → fully transparent
     return (rgba * 255).astype(np.uint8)
 
 
@@ -103,10 +109,11 @@ def plot_heatmap(
     """
     W_img, H_img = original_pil.size
     up = _upsample_score_map(score_map, H_img, W_img)
+    overlay = _score_map_to_rgba(up, colormap, alpha)  # [H, W, 4] RGBA
 
     fig, ax = plt.subplots(1, 1, figsize=(6, 6), dpi=dpi)
     ax.imshow(original_pil)
-    ax.imshow(up, cmap=colormap, alpha=alpha, vmin=np.nanmin(up), vmax=np.nanmax(up))
+    ax.imshow(overlay)
     ax.axis("off")
     if title:
         ax.set_title(title, fontsize=10)
@@ -154,8 +161,9 @@ def plot_heatmaps_grid(
     for col, layer_idx in enumerate(layers, start=1):
         ax = axes[col]
         up = _upsample_score_map(score_maps[layer_idx], H_img, W_img)
+        overlay = _score_map_to_rgba(up, colormap, alpha)
         ax.imshow(original_pil)
-        ax.imshow(up, cmap=colormap, alpha=alpha, vmin=np.nanmin(up), vmax=np.nanmax(up))
+        ax.imshow(overlay)
         ax.set_title(f"Layer {layer_idx}", fontsize=8)
         ax.axis("off")
 
@@ -263,9 +271,9 @@ def plot_combined_report(
     axes[0].axis("off")
 
     # Panel 2 – heatmap overlay
+    overlay = _score_map_to_rgba(up, colormap, alpha)
     axes[1].imshow(original_pil)
-    axes[1].imshow(up, cmap=colormap, alpha=alpha,
-                   vmin=np.nanmin(up), vmax=np.nanmax(up))
+    axes[1].imshow(overlay)
     axes[1].set_title("Attribution Heatmap", fontsize=10)
     axes[1].axis("off")
 
