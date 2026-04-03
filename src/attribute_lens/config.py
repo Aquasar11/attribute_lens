@@ -83,6 +83,14 @@ class EvalSection:
     blur_kernel_size: int = 55
     blur_sigma: float = 10.0
 
+    # Batch sizes
+    # How many perturbed images to stack into one forward pass during
+    # insertion/deletion curves.  Larger = faster (fewer GPU launches).
+    # Rule of thumb: as large as GPU VRAM allows (128–256 for ViT-L on 24 GB).
+    perturbation_batch_size: int = 128
+    # How many images to stack for the feature-extraction forward pass.
+    extraction_batch_size: int = 8
+
     # Visualization
     heatmap_colormap: str = "hot"
     heatmap_alpha: float = 0.6

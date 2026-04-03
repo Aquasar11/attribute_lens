@@ -44,7 +44,8 @@ def load_lens_checkpoint(path: str, device: str = "cpu") -> BaseLens:
         # net.0.weight → first linear [hidden_dim, d_model]
         # last net.N.weight → last linear [num_classes, hidden_dim or d_model]
         linear_keys = sorted(
-            k for k in sd if k.endswith(".weight") and k.startswith("net.")
+            (k for k in sd if k.endswith(".weight") and k.startswith("net.")),
+            key=lambda k: int(k.split(".")[1]),
         )
         first_w = sd[linear_keys[0]]   # [hidden_dim, d_model]
         last_w = sd[linear_keys[-1]]   # [num_classes, hidden_dim]

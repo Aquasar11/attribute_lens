@@ -31,7 +31,7 @@ from PIL import Image
 from tuned_lens.config import ModelConfig
 from tuned_lens.model import VisionModelWrapper
 
-from .config import AttributionConfig
+from .config import AttributionConfig, EvalSection
 from .scorer import CLSLensScorer, PatchLensScorer, discover_lens_files
 from .metrics import apply_gaussian_blur, insertion_curve, deletion_curve
 from .visualize import (
@@ -134,41 +134,34 @@ def _build_wrapper(config: AttributionConfig, device: str) -> VisionModelWrapper
 # Per-image evaluation
 # ---------------------------------------------------------------------------
 
-def _infer_patch_size(wrapper: VisionModelWrapper, image_size: int = 224) -> int:
-    """Infer patch size from the model's patch_embed grid."""
-    H_p, W_p = wrapper.patch_grid_size
-    return image_size // H_p
+def _infer_patch_size(wrapper: VisionModelWrapper) -> int:
+    """Return the pixel side length of each patch from the model's patch_embed."""
+    return wrapper.model.patch_embed.patch_size[0]
 
 
 def _evaluate_image(
     image_path: str,
-    wrapper: VisionModelWrapper,
+    pil_img: Image.Image,
+    image_tensor: torch.Tensor,
+    patch_states: dict[int, torch.Tensor],
+    y_hat: int,
+    blurred: torch.Tensor,
     cls_scorer: CLSLensScorer | None,
     patch_scorer: PatchLensScorer | None,
     target_layers: list[int],
     config: AttributionConfig,
     patch_size: int,
     device: str,
+    model: torch.nn.Module,
 ) -> dict:
     """Run full attribution pipeline on a single image.
 
+    Pre-computed inputs (``patch_states``, ``y_hat``, ``blurred``) are passed
+    in so that the caller can amortise the extraction forward pass across a
+    batch of images.
+
     Returns a dict with per-scorer, per-layer AUC values.
     """
-    pil_img = Image.open(image_path).convert("RGB")
-    transform = wrapper.get_transform()
-    image_tensor = transform(pil_img).unsqueeze(0).to(device)  # [1, C, H, W]
-
-    # Single forward pass: get patch states + final logits
-    patch_states, logits = wrapper.extract_patches(image_tensor)
-    y_hat = int(logits[0].argmax().item())
-
-    # Blurred baseline for insertion / deletion
-    blurred = apply_gaussian_blur(
-        image_tensor,
-        kernel_size=config.eval.blur_kernel_size,
-        sigma=config.eval.blur_sigma,
-    )
-
     stem = Path(image_path).stem
     out_root = config.eval.output_dir
 
@@ -201,24 +194,26 @@ def _evaluate_image(
 
             # Insertion curve
             ins_x, ins_y, ins_auc = insertion_curve(
-                model=wrapper.model,
+                model=model,
                 original=image_tensor,
                 blurred=blurred,
                 score_map=score_maps[layer_idx],
                 y_hat=y_hat,
                 patch_size=patch_size,
                 device=device,
+                eval_batch_size=config.eval.perturbation_batch_size,
             )
 
             # Deletion curve
             del_x, del_y, del_auc = deletion_curve(
-                model=wrapper.model,
+                model=model,
                 original=image_tensor,
                 blurred=blurred,
                 score_map=score_maps[layer_idx],
                 y_hat=y_hat,
                 patch_size=patch_size,
                 device=device,
+                eval_batch_size=config.eval.perturbation_batch_size,
             )
 
             layer_metrics[layer_idx] = {
@@ -506,33 +501,94 @@ def main() -> None:
         active_scorer_names.append("patch")
 
     all_image_metrics: list[dict] = []
+    transform = wrapper.get_transform()
+    extr_bs = config.eval.extraction_batch_size
+    n_total = len(image_paths)
 
-    for i, image_path in enumerate(image_paths, start=1):
-        print(f"[{i}/{len(image_paths)}] {image_path}")
-        try:
-            metrics = _evaluate_image(
-                image_path=image_path,
-                wrapper=wrapper,
-                cls_scorer=cls_scorer,
-                patch_scorer=patch_scorer,
-                target_layers=target_layers,
-                config=config,
-                patch_size=patch_size,
-                device=device,
-            )
-            all_image_metrics.append(metrics)
+    # Process images in extraction batches to amortise the feature-extraction
+    # forward pass; insertion/deletion curves are still per-image.
+    processed = 0
+    for batch_start in range(0, n_total, extr_bs):
+        batch_paths = image_paths[batch_start: batch_start + extr_bs]
 
-            # Print per-image AUCs
-            for sname, layers_data in metrics["scorers"].items():
-                for lidx, ldata in sorted(layers_data.items()):
-                    print(
-                        f"  {sname} layer {lidx}: "
-                        f"insertion={ldata['insertion_auc']:.4f}  "
-                        f"deletion={ldata['deletion_auc']:.4f}"
-                    )
-        except Exception as e:
-            print(f"  [error] {e}")
+        # Load and transform images
+        pil_imgs: list[Image.Image] = []
+        tensors: list[torch.Tensor] = []
+        valid_paths: list[str] = []
+        for path in batch_paths:
+            try:
+                pil = Image.open(path).convert("RGB")
+                t = transform(pil).to(device)
+                pil_imgs.append(pil)
+                tensors.append(t)
+                valid_paths.append(path)
+            except Exception as e:
+                print(f"  [load error] {path}: {e}")
+
+        if not tensors:
             continue
+
+        # Single extraction forward pass for the whole batch (hooks active)
+        batch_tensor = torch.stack(tensors, dim=0)   # [B, C, H, W]
+        with torch.no_grad():
+            batch_patch_states, batch_logits = wrapper.extract_patches(batch_tensor)
+
+        # Detach hooks before per-image perturbation loops so that the many
+        # model(batch_tensor) calls in insertion/deletion don't capture and
+        # store intermediate tensors for all 24 target layers.
+        wrapper._remove_hooks()
+
+        # Blurred baselines for the whole batch (cheap, no model needed)
+        batch_blurred = apply_gaussian_blur(
+            batch_tensor,
+            kernel_size=config.eval.blur_kernel_size,
+            sigma=config.eval.blur_sigma,
+        )
+
+        for i, (image_path, pil_img) in enumerate(zip(valid_paths, pil_imgs)):
+            processed += 1
+            print(f"[{processed}/{n_total}] {image_path}")
+
+            # Slice this image's data out of the batch
+            image_tensor = batch_tensor[i: i + 1]                        # [1, C, H, W]
+            patch_states_i = {
+                l: batch_patch_states[l][i: i + 1]
+                for l in batch_patch_states
+            }
+            y_hat = int(batch_logits[i].argmax().item())
+            blurred_i = batch_blurred[i: i + 1]                          # [1, C, H, W]
+
+            try:
+                metrics = _evaluate_image(
+                    image_path=image_path,
+                    pil_img=pil_img,
+                    image_tensor=image_tensor,
+                    patch_states=patch_states_i,
+                    y_hat=y_hat,
+                    blurred=blurred_i,
+                    cls_scorer=cls_scorer,
+                    patch_scorer=patch_scorer,
+                    target_layers=target_layers,
+                    config=config,
+                    patch_size=patch_size,
+                    device=device,
+                    model=wrapper.model,
+                )
+                all_image_metrics.append(metrics)
+
+                for sname, layers_data in metrics["scorers"].items():
+                    for lidx, ldata in sorted(layers_data.items()):
+                        print(
+                            f"  {sname} layer {lidx}: "
+                            f"insertion={ldata['insertion_auc']:.4f}  "
+                            f"deletion={ldata['deletion_auc']:.4f}"
+                        )
+            except Exception as e:
+                print(f"  [error] {e}")
+                continue
+
+        # Re-attach hooks for the next batch's extraction pass
+        wrapper._register_hooks()
 
     if not all_image_metrics:
         print("No images successfully evaluated.")

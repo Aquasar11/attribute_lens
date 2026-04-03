@@ -77,19 +77,6 @@ def _rank_patches(score_map: torch.Tensor) -> list[int]:
     return sorted_valid + sorted_nan
 
 
-@torch.no_grad()
-def _get_class_prob(
-    model: torch.nn.Module,
-    image: torch.Tensor,
-    class_idx: int,
-    device: str,
-) -> float:
-    """Single forward pass → probability of ``class_idx``."""
-    logits = model(image.to(device))
-    prob = F.softmax(logits[0], dim=0)[class_idx].item()
-    return float(prob)
-
-
 # ---------------------------------------------------------------------------
 # Insertion curve
 # ---------------------------------------------------------------------------
@@ -103,12 +90,15 @@ def insertion_curve(
     y_hat: int,
     patch_size: int,
     device: str = "cpu",
+    eval_batch_size: int = 128,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Compute insertion curve and AUC.
+    """Compute insertion curve and AUC with batched model inference.
 
     Starts from ``blurred`` and sequentially restores the ``original`` image
-    patch by patch, ordered by descending score.  The model is evaluated after
-    each insertion step.
+    patch by patch, ordered by descending score.  Perturbed images are
+    accumulated into a batch of size ``eval_batch_size`` before a single
+    forward pass, reducing GPU launches from ``n_patches`` to
+    ``ceil(n_patches / eval_batch_size)``.
 
     Args:
         model: The frozen backbone (``VisionModelWrapper.model``).
@@ -119,6 +109,7 @@ def insertion_curve(
         y_hat: Class index to track.
         patch_size: Pixel side length of each patch (e.g. 14 for ViT-L/14).
         device: Device for model inference.
+        eval_batch_size: Number of perturbed images per forward pass.
 
     Returns:
         ``(fractions, probabilities, auc_value)`` — fraction of patches inserted,
@@ -134,18 +125,34 @@ def insertion_curve(
     fractions: list[float] = []
     probabilities: list[float] = []
 
-    for step, pidx in enumerate(rank_order):
-        y0, y1, x0, x1 = _patch_coords(pidx, W_p, patch_size)
-        current[:, :, y0:y1, x0:x1] = orig_dev[:, :, y0:y1, x0:x1]
+    step = 0
+    while step < n_patches:
+        batch_imgs: list[torch.Tensor] = []
+        batch_steps: list[int] = []
 
-        prob = _get_class_prob(model, current, y_hat, device)
-        fractions.append((step + 1) / n_patches)
-        probabilities.append(prob)
+        # Apply patches sequentially and snapshot each intermediate state
+        for _ in range(eval_batch_size):
+            if step >= n_patches:
+                break
+            pidx = rank_order[step]
+            y0, y1, x0, x1 = _patch_coords(pidx, W_p, patch_size)
+            current[:, :, y0:y1, x0:x1] = orig_dev[:, :, y0:y1, x0:x1]
+            batch_imgs.append(current.clone())
+            batch_steps.append(step)
+            step += 1
+
+        # Single forward pass for the whole chunk
+        batch_tensor = torch.cat(batch_imgs, dim=0)        # [B, C, H, W]
+        logits = model(batch_tensor)
+        probs = F.softmax(logits, dim=-1)[:, y_hat].cpu().tolist()
+
+        for s, prob in zip(batch_steps, probs):
+            fractions.append((s + 1) / n_patches)
+            probabilities.append(float(prob))
 
     x = np.array(fractions)
     y = np.array(probabilities)
-    auc_val = float(sklearn_auc(x, y))
-    return x, y, auc_val
+    return x, y, float(sklearn_auc(x, y))
 
 
 # ---------------------------------------------------------------------------
@@ -161,12 +168,14 @@ def deletion_curve(
     y_hat: int,
     patch_size: int,
     device: str = "cpu",
+    eval_batch_size: int = 128,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Compute deletion curve and AUC.
+    """Compute deletion curve and AUC with batched model inference.
 
     Starts from ``original`` and sequentially replaces patches with the
-    ``blurred`` baseline, ordered by descending score.  The model is evaluated
-    after each deletion step.
+    ``blurred`` baseline, ordered by descending score.  Perturbed images are
+    accumulated into a batch of size ``eval_batch_size`` before a single
+    forward pass.
 
     Args:
         model: The frozen backbone.
@@ -176,6 +185,7 @@ def deletion_curve(
         y_hat: Class index to track.
         patch_size: Pixel side length of each patch.
         device: Device for model inference.
+        eval_batch_size: Number of perturbed images per forward pass.
 
     Returns:
         ``(fractions, probabilities, auc_value)``.
@@ -190,15 +200,29 @@ def deletion_curve(
     fractions: list[float] = []
     probabilities: list[float] = []
 
-    for step, pidx in enumerate(rank_order):
-        y0, y1, x0, x1 = _patch_coords(pidx, W_p, patch_size)
-        current[:, :, y0:y1, x0:x1] = blur_dev[:, :, y0:y1, x0:x1]
+    step = 0
+    while step < n_patches:
+        batch_imgs: list[torch.Tensor] = []
+        batch_steps: list[int] = []
 
-        prob = _get_class_prob(model, current, y_hat, device)
-        fractions.append((step + 1) / n_patches)
-        probabilities.append(prob)
+        for _ in range(eval_batch_size):
+            if step >= n_patches:
+                break
+            pidx = rank_order[step]
+            y0, y1, x0, x1 = _patch_coords(pidx, W_p, patch_size)
+            current[:, :, y0:y1, x0:x1] = blur_dev[:, :, y0:y1, x0:x1]
+            batch_imgs.append(current.clone())
+            batch_steps.append(step)
+            step += 1
+
+        batch_tensor = torch.cat(batch_imgs, dim=0)        # [B, C, H, W]
+        logits = model(batch_tensor)
+        probs = F.softmax(logits, dim=-1)[:, y_hat].cpu().tolist()
+
+        for s, prob in zip(batch_steps, probs):
+            fractions.append((s + 1) / n_patches)
+            probabilities.append(float(prob))
 
     x = np.array(fractions)
     y = np.array(probabilities)
-    auc_val = float(sklearn_auc(x, y))
-    return x, y, auc_val
+    return x, y, float(sklearn_auc(x, y))
