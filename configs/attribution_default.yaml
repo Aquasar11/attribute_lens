@@ -1,0 +1,26 @@
+model:
+  model_name: "vit_large_patch14_clip_224.openai_ft_in1k"
+  weights_path: null          # null = download from timm hub; or local .safetensors path
+  target_layers: null         # null = all layers present in lens dirs; or e.g. [6, 12, 18, 23]
+
+lens:
+  cls_lens_dir: "outputs/affine_kld/best_lenses"
+  patch_lens_dir: "outputs/patch_affine_kld/best_lenses"
+  patch_neighbor_size: 3      # must match training config (k)
+  patch_border: 2             # must match training config
+  means_path: "outputs/precomputed_means.pt"  # required when scorer_type includes "cls"
+
+eval:
+  image_paths: []             # explicit image file paths (takes precedence over image_dir)
+  image_dir: "/opt/models/datasets/imagenet/extracted/val"  # ImageNet val split (same root as tuned_lens configs)
+  num_images: null            # null = all; or set e.g. 100 to limit evaluation
+  output_dir: "outputs/attribution"
+  device: "cuda"              # "cuda" or "cpu"
+  scorer_type: "both"         # "cls" | "patch" | "both"
+  blur_kernel_size: 55        # Gaussian blur kernel for insertion/deletion baseline
+  blur_sigma: 10.0
+  heatmap_colormap: "hot"
+  heatmap_alpha: 0.6
+  plot_dpi: 150
+
+seed: 42

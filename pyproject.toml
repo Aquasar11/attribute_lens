@@ -18,6 +18,9 @@ dependencies = [
     "safetensors",
     "tensorboard",
     "pillow",
+    "matplotlib",
+    "scikit-learn",
+    "numpy",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +29,7 @@ dev = ["pytest", "ipykernel"]
 [project.scripts]
 tuned-lens-train = "tuned_lens.scripts.train:main"
 prepare-imagenet = "tuned_lens.scripts.prepare_imagenet:main"
+attribute-lens-eval = "attribute_lens.evaluate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
