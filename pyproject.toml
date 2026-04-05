@@ -9,8 +9,8 @@ description = "Tuned lens training for vision transformer interpretability"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.0",
-    "torchvision",
+    "torch==2.9.0",
+    "torchvision==0.24.0",
     "timm>=1.0",
     "pytorch-lightning>=2.0",
     "optuna>=3.0",

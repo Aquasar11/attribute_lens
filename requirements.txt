@@ -1,8 +1,8 @@
-torch>=2.0
-torchvision
-timm>=1.0
-pytorch-lightning>=2.0
-optuna>=3.0
+torch==2.9.0
+torchvision==0.24.0
+timm
+pytorch-lightning
+optuna
 optuna-integration[pytorch_lightning]
 pyyaml
 safetensors
