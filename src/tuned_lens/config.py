@@ -136,3 +136,65 @@ class TunedLensConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class PatchMapConfig:
+    """Configuration for the patch map architecture."""
+    map_type: str = "low_rank"  # "full" | "low_rank"
+    rank: int = 128             # only used when map_type == "low_rank"
+    fg_threshold: float = 0.80
+    bg_threshold: float = 0.20
+    neg_weight: float = 0.5
+    neg_clip: float = 0.3
+
+
+@dataclass
+class PatchMapDataConfig:
+    """Configuration for bbox-aware ImageNet data loading."""
+    imagenet_root: str = ""
+    bbox_dir_train: str = ""  # e.g. /opt/models/datasets/imagenet/boxes/train
+    bbox_dir_val: str = ""    # e.g. /opt/models/datasets/imagenet/boxes/val
+    batch_size: int = 32
+    num_workers: int = 4
+    max_images_per_class: int | None = None
+
+
+@dataclass
+class PatchMapTrainingConfig:
+    """Configuration for patch map training loop."""
+    lr: float = 1e-3
+    weight_decay: float = 0.0
+    optimizer: str = "adam"   # "adam" | "adamw" | "sgd" | "rmsprop"
+    scheduler: str = "cosine"  # "cosine" | "step" | "plateau" | "none"
+    warmup_steps: int = 100
+    max_epochs: int = 20
+    grad_clip_norm: float = 1.0
+    val_check_interval: int | float = 1.0
+
+
+@dataclass
+class PatchMapFullConfig:
+    """Top-level configuration for contrastive patch map training."""
+    model: ModelConfig = field(default_factory=ModelConfig)
+    patch_map: PatchMapConfig = field(default_factory=PatchMapConfig)
+    data: PatchMapDataConfig = field(default_factory=PatchMapDataConfig)
+    training: PatchMapTrainingConfig = field(default_factory=PatchMapTrainingConfig)
+    output_dir: str = "outputs/patch_map"
+    seed: int = 42
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> PatchMapFullConfig:
+        with open(path) as f:
+            raw = yaml.safe_load(f)
+        if raw is None:
+            return cls()
+        return _dataclass_from_dict(cls, raw)
+
+    def to_yaml(self, path: str | Path) -> None:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            yaml.dump(asdict(self), f, default_flow_style=False, sort_keys=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)

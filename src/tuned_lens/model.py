@@ -137,6 +137,50 @@ class VisionModelWrapper:
         logits = self.model(images)
         return dict(self._hidden_states), logits
 
+    @torch.no_grad()
+    def extract_cls_and_patches(
+        self, images: torch.Tensor
+    ) -> tuple[dict[int, torch.Tensor], dict[int, torch.Tensor], torch.Tensor]:
+        """Extract CLS tokens and patch grids in a single forward pass.
+
+        Temporarily installs full-sequence hooks (capturing all tokens) regardless
+        of the wrapper's current ``patch_mode`` setting, then restores original hooks.
+
+        Args:
+            images: Input images [B, C, H, W].
+
+        Returns:
+            cls_dict:      {layer_idx: [B, d_model]}
+            patch_dict:    {layer_idx: [B, H, W, d_model]}
+            target_logits: Final model output [B, num_classes].
+        """
+        self._remove_hooks()
+        full_states: dict[int, torch.Tensor] = {}
+
+        def make_full_hook(layer_idx: int) -> Any:
+            def hook_fn(module: nn.Module, input: Any, output: torch.Tensor) -> None:
+                full_states[layer_idx] = output.detach()  # [B, 1+H*W, d]
+            return hook_fn
+
+        temp_hooks: list[RemovableHandle] = []
+        for layer_idx in self.target_layers:
+            h = self.model.blocks[layer_idx].register_forward_hook(make_full_hook(layer_idx))
+            temp_hooks.append(h)
+
+        logits = self.model(images)
+
+        for h in temp_hooks:
+            h.remove()
+        self._register_hooks()
+
+        H, W = self.patch_grid_size
+        cls_dict = {k: v[:, 0, :] for k, v in full_states.items()}
+        patch_dict = {
+            k: v[:, 1:, :].reshape(v.shape[0], H, W, v.shape[-1])
+            for k, v in full_states.items()
+        }
+        return cls_dict, patch_dict, logits
+
     def get_head_parameters(self) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Return (weight, bias) of the pretrained classification head."""
         weight = self.model.head.weight.data.clone()
