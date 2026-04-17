@@ -171,6 +171,7 @@ class PatchMapTrainingConfig:
     max_epochs: int = 20
     grad_clip_norm: float = 1.0
     val_check_interval: int | float = 1.0
+    early_stopping_patience: int | None = None  # None = disabled
 
 
 @dataclass

@@ -97,6 +97,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--early-stopping-patience", type=int, default=None,
+                        help="Early stopping patience (epochs). Omit or set to 0 to disable.")
 
     return parser.parse_args()
 
@@ -140,6 +142,32 @@ def apply_overrides(config: PatchMapFullConfig, args: argparse.Namespace) -> Non
         config.output_dir = args.output_dir
     if args.seed is not None:
         config.seed = args.seed
+    if args.early_stopping_patience is not None:
+        config.training.early_stopping_patience = args.early_stopping_patience or None
+
+
+def _build_callbacks(config: PatchMapFullConfig) -> list:
+    callbacks = [
+        pl.callbacks.ModelCheckpoint(
+            dirpath=f"{config.output_dir}/checkpoints",
+            monitor="val/loss_avg",
+            mode="min",
+            save_top_k=3,
+            filename="epoch{epoch:02d}-val_loss{val/loss_avg:.4f}",
+            auto_insert_metric_name=False,
+        ),
+        pl.callbacks.LearningRateMonitor(logging_interval="step"),
+        _EpochLogger(),
+    ]
+    if config.training.early_stopping_patience is not None:
+        callbacks.append(
+            pl.callbacks.EarlyStopping(
+                monitor="val/loss_avg",
+                patience=config.training.early_stopping_patience,
+                mode="min",
+            )
+        )
+    return callbacks
 
 
 def main() -> None:
@@ -172,23 +200,7 @@ def main() -> None:
         max_epochs=config.training.max_epochs,
         gradient_clip_val=config.training.grad_clip_norm,
         val_check_interval=config.training.val_check_interval,
-        callbacks=[
-            pl.callbacks.ModelCheckpoint(
-                dirpath=f"{config.output_dir}/checkpoints",
-                monitor="val/loss_avg",
-                mode="min",
-                save_top_k=3,
-                filename="epoch{epoch:02d}-val_loss{val/loss_avg:.4f}",
-                auto_insert_metric_name=False,
-            ),
-            pl.callbacks.LearningRateMonitor(logging_interval="step"),
-            pl.callbacks.EarlyStopping(
-                monitor="val/loss_avg",
-                patience=5,
-                mode="min",
-            ),
-            _EpochLogger(),
-        ],
+        callbacks=_build_callbacks(config),
         logger=pl.loggers.TensorBoardLogger(
             save_dir=config.output_dir,
             name="tensorboard",
