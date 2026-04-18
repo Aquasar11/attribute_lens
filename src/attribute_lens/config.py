@@ -93,6 +93,9 @@ class EvalSection:
     # How many images to stack for the feature-extraction forward pass.
     extraction_batch_size: int = 8
 
+    # Precision
+    use_fp16: bool = True   # FP16 autocast for perturbation forward passes; no accuracy loss at inference
+
     # Visualization
     heatmap_colormap: str = "hot"
     heatmap_alpha: float = 0.6

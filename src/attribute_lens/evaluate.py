@@ -187,6 +187,7 @@ def _run_batch_perturbations(
     patch_size: int,
     device: str,
     eval_batch_size: int,
+    use_fp16: bool = False,
 ) -> list[dict[str, dict[int, tuple]]]:
     """Run insertion+deletion curves for all images.
 
@@ -216,6 +217,7 @@ def _run_batch_perturbations(
                 patch_size=patch_size,
                 device=device,
                 eval_batch_size=eval_batch_size,
+                use_fp16=use_fp16,
             )
             results[i][scorer_name] = layer_curves
 
@@ -524,6 +526,19 @@ def main() -> None:
     patch_size = _infer_patch_size(wrapper)
     print(f"Patch size: {patch_size}px | Grid: {wrapper.patch_grid_size}")
 
+    # Compile a separate callable for perturbation forward passes.
+    # wrapper.model is kept uncompiled for feature extraction (hooks must work normally).
+    print("Compiling model for perturbation inference...")
+    try:
+        perturb_model = torch.compile(wrapper.model, dynamic=True)
+        print("  torch.compile: OK")
+    except Exception as e:
+        print(f"  torch.compile unavailable ({e}), using eager mode.")
+        perturb_model = wrapper.model
+
+    precision = "fp16" if config.eval.use_fp16 and device == "cuda" else "fp32"
+    print(f"  Perturbation precision: {precision}")
+
     # Build scorers
     cls_scorer: CLSLensScorer | None = None
     patch_scorer: PatchLensScorer | None = None
@@ -641,7 +656,7 @@ def main() -> None:
         # Batch insertion/deletion across images (the slow part)
         try:
             batch_curves = _run_batch_perturbations(
-                model=wrapper.model,
+                model=perturb_model,
                 batch_tensor=batch_tensor,
                 batch_blurred=batch_blurred,
                 batch_score_maps=batch_score_maps,
@@ -650,6 +665,7 @@ def main() -> None:
                 patch_size=patch_size,
                 device=device,
                 eval_batch_size=config.eval.perturbation_batch_size,
+                use_fp16=config.eval.use_fp16 and device == "cuda",
             )
         except Exception as e:
             print(f"  [batch perturbation error] {e}")

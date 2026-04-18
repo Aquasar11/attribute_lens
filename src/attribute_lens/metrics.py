@@ -124,13 +124,16 @@ def _run_batched_forward(
     imgs: torch.Tensor,
     y_hat: int,
     batch_size: int,
+    use_fp16: bool = False,
 ) -> list[float]:
     """Run *model* on *imgs* in chunks of *batch_size*, return P(y_hat) list."""
     probs: list[float] = []
+    device_type = imgs.device.type
     for i in range(0, len(imgs), batch_size):
         chunk = imgs[i: i + batch_size]
-        logits = model(chunk)
-        probs.extend(F.softmax(logits, dim=-1)[:, y_hat].cpu().tolist())
+        with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=use_fp16):
+            logits = model(chunk)
+        probs.extend(F.softmax(logits.float(), dim=-1)[:, y_hat].cpu().tolist())
     return probs
 
 
@@ -264,6 +267,7 @@ def insertion_deletion_curves_all_layers(
     patch_size: int,
     device: str = "cpu",
     eval_batch_size: int = 128,
+    use_fp16: bool = False,
 ) -> dict[int, tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray, float]]:
     """Compute insertion+deletion curves for ALL layers in two forward passes.
 
@@ -301,7 +305,7 @@ def insertion_deletion_curves_all_layers(
         all_ins[k * n_patches: (k + 1) * n_patches] = _build_perturbed_images(
             blurred, original, rank_orders[l], W_p, patch_size, device
         )
-    ins_probs = _run_batched_forward(model, all_ins, y_hat, eval_batch_size)
+    ins_probs = _run_batched_forward(model, all_ins, y_hat, eval_batch_size, use_fp16)
     del all_ins
 
     # ---- Pass 2: deletion (original → blurred) ----
@@ -310,7 +314,7 @@ def insertion_deletion_curves_all_layers(
         all_del[k * n_patches: (k + 1) * n_patches] = _build_perturbed_images(
             original, blurred, rank_orders[l], W_p, patch_size, device
         )
-    del_probs = _run_batched_forward(model, all_del, y_hat, eval_batch_size)
+    del_probs = _run_batched_forward(model, all_del, y_hat, eval_batch_size, use_fp16)
     del all_del
 
     x = np.linspace(1 / n_patches, 1.0, n_patches)

@@ -22,7 +22,8 @@ eval:
   blur_kernel_size: 55        # Gaussian blur kernel for insertion/deletion baseline
   blur_sigma: 10.0
   perturbation_batch_size: 2048  # perturbed images per forward pass in insertion/deletion curves
-  extraction_batch_size: 8       # images batched together for feature extraction
+  extraction_batch_size: 64      # images batched together for feature extraction
+  use_fp16: true                 # FP16 autocast for perturbation passes; set false to use FP32
   heatmap_colormap: "hot"
   heatmap_alpha: 0.6
   plot_dpi: 150
