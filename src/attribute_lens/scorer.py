@@ -17,6 +17,7 @@ import torch.nn.functional as F
 
 # Import lens classes from the sibling tuned_lens package
 from tuned_lens.lens import AffineLens, MLPLens, BaseLens
+from tuned_lens.patch_map import BasePatchMap, FullPatchMap, LowRankPatchMap
 
 
 # ---------------------------------------------------------------------------
@@ -301,4 +302,121 @@ class PatchLensScorer:
                     score_map[i, j] = s
 
             results[idx] = score_map.cpu()
+        return results
+
+
+# ---------------------------------------------------------------------------
+# Patch map checkpoint loading
+# ---------------------------------------------------------------------------
+
+def load_patch_map_checkpoint(path: str, device: str = "cpu") -> BasePatchMap:
+    """Load a patch map from a .pt checkpoint, auto-detecting Full vs LowRank.
+
+    Inspects state_dict keys:
+    - ``linear.weight`` → FullPatchMap(d_model)
+    - ``down.weight``   → LowRankPatchMap(d_model, rank)
+    """
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    sd = payload["state_dict"]
+
+    if "linear.weight" in sd:
+        # FullPatchMap: linear.weight shape [d_model, d_model]
+        d_model = sd["linear.weight"].shape[0]
+        patch_map: BasePatchMap = FullPatchMap(d_model=d_model)
+    elif "down.weight" in sd:
+        # LowRankPatchMap: down.weight [rank, d_model], up.weight [d_model, rank]
+        rank, d_model = sd["down.weight"].shape
+        patch_map = LowRankPatchMap(d_model=d_model, rank=rank)
+    else:
+        raise ValueError(
+            f"Cannot identify patch map type from state_dict keys: {list(sd.keys())}"
+        )
+
+    patch_map.load_state_dict(sd)
+    patch_map.to(device)
+    patch_map.eval()
+    return patch_map
+
+
+# ---------------------------------------------------------------------------
+# Patch Map CLS Lens Scorer
+# ---------------------------------------------------------------------------
+
+class PatchMapCLSLensScorer:
+    """Scores patch tokens by applying a trained patch map then a CLS lens.
+
+    For each patch position p at layer L::
+
+        mapped[p] = patch_map_L(h[p])               # Wx + b  [d_model → d_model]
+        score[p]  = softmax(cls_lens_L(mapped[p]))[y_hat]
+
+    The patch map transforms patch embeddings into a space aligned with CLS
+    tokens (trained contrastively with FG/BG bbox supervision), replacing
+    the mean-shift heuristic used in ``CLSLensScorer``.
+
+    Args:
+        cls_lens_dir: Directory with ``layer_{idx}.pt`` CLS lens checkpoints.
+        patch_map_dir: Directory with ``layer_{idx}.pt`` patch map checkpoints.
+        target_layers: Layer indices to score.
+        device: Torch device string.
+    """
+
+    def __init__(
+        self,
+        cls_lens_dir: str,
+        patch_map_dir: str,
+        target_layers: list[int],
+        device: str = "cpu",
+    ) -> None:
+        self.device = device
+        self.target_layers = target_layers
+
+        # Load CLS lenses
+        available_lenses = discover_lens_files(cls_lens_dir)
+        self.lenses: dict[int, BaseLens] = {}
+        for idx in target_layers:
+            if idx not in available_lenses:
+                raise FileNotFoundError(
+                    f"CLS lens checkpoint not found for layer {idx} in {cls_lens_dir}"
+                )
+            self.lenses[idx] = load_lens_checkpoint(available_lenses[idx], device=device)
+
+        # Load patch maps
+        available_maps = discover_lens_files(patch_map_dir)  # same layer_*.pt pattern
+        self.patch_maps: dict[int, BasePatchMap] = {}
+        for idx in target_layers:
+            if idx not in available_maps:
+                raise FileNotFoundError(
+                    f"Patch map checkpoint not found for layer {idx} in {patch_map_dir}"
+                )
+            self.patch_maps[idx] = load_patch_map_checkpoint(
+                available_maps[idx], device=device
+            )
+
+    @torch.no_grad()
+    def score_all_layers(
+        self,
+        patch_states: dict[int, torch.Tensor],
+        y_hat: int,
+    ) -> dict[int, torch.Tensor]:
+        """Compute patch score maps for all target layers.
+
+        Args:
+            patch_states: ``{layer_idx: Tensor[1, H, W, d_model]}`` from
+                ``VisionModelWrapper.extract_patches()``.
+            y_hat: Predicted class index (int) whose probability is the score.
+
+        Returns:
+            ``{layer_idx: Tensor[H, W]}`` float scores in [0, 1].
+        """
+        results: dict[int, torch.Tensor] = {}
+        for idx in self.target_layers:
+            patches = patch_states[idx].to(self.device)  # [1, H, W, d_model]
+            _, H, W, d = patches.shape
+            flat = patches[0].reshape(H * W, d)           # [H*W, d_model]
+
+            mapped = self.patch_maps[idx](flat)            # [H*W, d_model]
+            logits = self.lenses[idx](mapped)              # [H*W, num_classes]
+            scores = F.softmax(logits, dim=-1)[:, y_hat]  # [H*W]
+            results[idx] = scores.reshape(H, W).cpu()
         return results

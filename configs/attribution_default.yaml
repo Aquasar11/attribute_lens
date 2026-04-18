@@ -6,17 +6,19 @@ model:
 lens:
   cls_lens_dir: "outputs/affine_kld/best_lenses"
   patch_lens_dir: "outputs/patch_affine_kld/best_lenses"
+  patch_map_dir: "outputs/patch_map_lowrank/best_lenses"           # directory with layer_*.pt patch map checkpoints (for patch_map_cls scorer)
   patch_neighbor_size: 3      # must match training config (k)
   patch_border: 2             # must match training config
-  means_path: "outputs/precomputed_means.pt"  # required when scorer_type includes "cls"
+  means_path: ""  # required when scorer_type includes "cls"
 
 eval:
   image_paths: []             # explicit image file paths (takes precedence over image_dir)
   image_dir: "/opt/models/datasets/imagenet/extracted/val"  # ImageNet val split (same root as tuned_lens configs)
-  num_images: null            # null = all; or set e.g. 100 to limit evaluation
+  num_images: null            # null = all; or set e.g. 5000 to limit evaluation
+  num_save_images: 50         # save PNGs/metrics.json for this many random images; null = save all
   output_dir: "outputs/attribution"
   device: "cuda"              # "cuda" or "cpu"
-  scorer_type: "both"         # "cls" | "patch" | "both"
+  scorer_type: "patch_map_cls"         # "cls" | "patch" | "both" | "patch_map_cls" | "all"
   blur_kernel_size: 55        # Gaussian blur kernel for insertion/deletion baseline
   blur_sigma: 10.0
   perturbation_batch_size: 128  # perturbed images per forward pass in insertion/deletion curves

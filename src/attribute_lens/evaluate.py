@@ -32,7 +32,7 @@ from tuned_lens.config import ModelConfig
 from tuned_lens.model import VisionModelWrapper
 
 from .config import AttributionConfig, EvalSection
-from .scorer import CLSLensScorer, PatchLensScorer, discover_lens_files
+from .scorer import CLSLensScorer, PatchLensScorer, PatchMapCLSLensScorer, discover_lens_files
 from .metrics import apply_gaussian_blur, insertion_curve, deletion_curve
 from .visualize import (
     plot_heatmap,
@@ -84,20 +84,34 @@ def _resolve_target_layers(
     """Determine target layers from available lens files and config override."""
     layers: set[int] = set()
 
-    if scorer_type in ("cls", "both") and config.lens.cls_lens_dir:
+    if scorer_type in ("cls", "both", "all") and config.lens.cls_lens_dir:
         layers |= set(discover_lens_files(config.lens.cls_lens_dir).keys())
 
-    if scorer_type in ("patch", "both") and config.lens.patch_lens_dir:
+    if scorer_type in ("patch", "both", "all") and config.lens.patch_lens_dir:
         available = set(discover_lens_files(config.lens.patch_lens_dir).keys())
         if layers:
             layers &= available   # intersection when both scorers active
         else:
             layers = available
 
+    if scorer_type in ("patch_map_cls", "all") and config.lens.patch_map_dir:
+        # Require intersection of patch_map layers and CLS lens layers
+        pm_available = set(discover_lens_files(config.lens.patch_map_dir).keys())
+        cls_available = (
+            set(discover_lens_files(config.lens.cls_lens_dir).keys())
+            if config.lens.cls_lens_dir
+            else pm_available
+        )
+        available = pm_available & cls_available
+        if layers:
+            layers &= available
+        else:
+            layers = available
+
     if not layers:
         raise ValueError(
             "No lens checkpoint files found. "
-            "Check lens.cls_lens_dir / lens.patch_lens_dir in config."
+            "Check lens.cls_lens_dir / lens.patch_lens_dir / lens.patch_map_dir in config."
         )
 
     if config.model.target_layers is not None:
@@ -148,17 +162,23 @@ def _evaluate_image(
     blurred: torch.Tensor,
     cls_scorer: CLSLensScorer | None,
     patch_scorer: PatchLensScorer | None,
+    patch_map_cls_scorer: PatchMapCLSLensScorer | None,
     target_layers: list[int],
     config: AttributionConfig,
     patch_size: int,
     device: str,
     model: torch.nn.Module,
+    save_outputs: bool = True,
 ) -> dict:
     """Run full attribution pipeline on a single image.
 
     Pre-computed inputs (``patch_states``, ``y_hat``, ``blurred``) are passed
     in so that the caller can amortise the extraction forward pass across a
     batch of images.
+
+    Args:
+        save_outputs: If False, skip all per-image file I/O (PNGs, metrics.json).
+            Metrics are still computed and returned for aggregate statistics.
 
     Returns a dict with per-scorer, per-layer AUC values.
     """
@@ -171,15 +191,18 @@ def _evaluate_image(
         "scorers": {},
     }
 
-    active_scorers: list[tuple[str, CLSLensScorer | PatchLensScorer]] = []
+    active_scorers: list[tuple[str, CLSLensScorer | PatchLensScorer | PatchMapCLSLensScorer]] = []
     if cls_scorer is not None:
         active_scorers.append(("cls", cls_scorer))
     if patch_scorer is not None:
         active_scorers.append(("patch", patch_scorer))
+    if patch_map_cls_scorer is not None:
+        active_scorers.append(("patch_map_cls", patch_map_cls_scorer))
 
     for scorer_name, scorer in active_scorers:
-        scorer_dir = os.path.join(out_root, stem, scorer_name)
-        os.makedirs(scorer_dir, exist_ok=True)
+        if save_outputs:
+            scorer_dir = os.path.join(out_root, stem, scorer_name)
+            os.makedirs(scorer_dir, exist_ok=True)
 
         score_maps = scorer.score_all_layers(patch_states, y_hat)
 
@@ -190,7 +213,8 @@ def _evaluate_image(
             if layer_idx not in score_maps:
                 continue
             sm = score_maps[layer_idx].cpu().numpy()
-            all_score_maps_np[layer_idx] = sm
+            if save_outputs:
+                all_score_maps_np[layer_idx] = sm
 
             # Insertion curve
             ins_x, ins_y, ins_auc = insertion_curve(
@@ -225,39 +249,40 @@ def _evaluate_image(
                 "deletion_y": del_y.tolist(),
             }
 
-            # Save per-layer heatmap
-            plot_heatmap(
-                pil_img, sm,
-                output_path=os.path.join(scorer_dir, f"layer_{layer_idx}_heatmap.png"),
-                title=f"{scorer_name} | layer {layer_idx} | y_hat={y_hat}",
-                colormap=config.eval.heatmap_colormap,
-                alpha=config.eval.heatmap_alpha,
-                dpi=config.eval.plot_dpi,
-            )
+            if save_outputs:
+                # Save per-layer heatmap
+                plot_heatmap(
+                    pil_img, sm,
+                    output_path=os.path.join(scorer_dir, f"layer_{layer_idx}_heatmap.png"),
+                    title=f"{scorer_name} | layer {layer_idx} | y_hat={y_hat}",
+                    colormap=config.eval.heatmap_colormap,
+                    alpha=config.eval.heatmap_alpha,
+                    dpi=config.eval.plot_dpi,
+                )
 
-            # Save per-layer insertion/deletion curves
-            plot_curves(
-                ins_x, ins_y, ins_auc,
-                del_x, del_y, del_auc,
-                output_path=os.path.join(scorer_dir, f"layer_{layer_idx}_curves.png"),
-                title=f"{scorer_name} | layer {layer_idx} | y_hat={y_hat}",
-                dpi=config.eval.plot_dpi,
-            )
+                # Save per-layer insertion/deletion curves
+                plot_curves(
+                    ins_x, ins_y, ins_auc,
+                    del_x, del_y, del_auc,
+                    output_path=os.path.join(scorer_dir, f"layer_{layer_idx}_curves.png"),
+                    title=f"{scorer_name} | layer {layer_idx} | y_hat={y_hat}",
+                    dpi=config.eval.plot_dpi,
+                )
 
-            # Save combined 4-panel report
-            plot_combined_report(
-                pil_img, sm,
-                ins_x, ins_y, ins_auc,
-                del_x, del_y, del_auc,
-                output_path=os.path.join(scorer_dir, f"layer_{layer_idx}_report.png"),
-                title=f"{stem} | {scorer_name} | layer {layer_idx}",
-                colormap=config.eval.heatmap_colormap,
-                alpha=config.eval.heatmap_alpha,
-                dpi=config.eval.plot_dpi,
-            )
+                # Save combined 4-panel report
+                plot_combined_report(
+                    pil_img, sm,
+                    ins_x, ins_y, ins_auc,
+                    del_x, del_y, del_auc,
+                    output_path=os.path.join(scorer_dir, f"layer_{layer_idx}_report.png"),
+                    title=f"{stem} | {scorer_name} | layer {layer_idx}",
+                    colormap=config.eval.heatmap_colormap,
+                    alpha=config.eval.heatmap_alpha,
+                    dpi=config.eval.plot_dpi,
+                )
 
-        # Save multi-layer heatmap grid
-        if all_score_maps_np:
+        if save_outputs and all_score_maps_np:
+            # Save multi-layer heatmap grid
             plot_heatmaps_grid(
                 pil_img,
                 all_score_maps_np,
@@ -270,26 +295,27 @@ def _evaluate_image(
 
         image_metrics["scorers"][scorer_name] = layer_metrics
 
-    # Save per-image metrics JSON
-    metrics_path = os.path.join(out_root, stem, "metrics.json")
-    os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
-    with open(metrics_path, "w") as f:
-        # Exclude large curve arrays from JSON for compactness
-        compact = {
-            "image_path": image_metrics["image_path"],
-            "y_hat": image_metrics["y_hat"],
-            "scorers": {
-                sname: {
-                    str(lidx): {
-                        "insertion_auc": ldata["insertion_auc"],
-                        "deletion_auc": ldata["deletion_auc"],
+    if save_outputs:
+        # Save per-image metrics JSON
+        metrics_path = os.path.join(out_root, stem, "metrics.json")
+        os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+        with open(metrics_path, "w") as f:
+            # Exclude large curve arrays from JSON for compactness
+            compact = {
+                "image_path": image_metrics["image_path"],
+                "y_hat": image_metrics["y_hat"],
+                "scorers": {
+                    sname: {
+                        str(lidx): {
+                            "insertion_auc": ldata["insertion_auc"],
+                            "deletion_auc": ldata["deletion_auc"],
+                        }
+                        for lidx, ldata in layers_data.items()
                     }
-                    for lidx, ldata in layers_data.items()
-                }
-                for sname, layers_data in image_metrics["scorers"].items()
-            },
-        }
-        json.dump(compact, f, indent=2)
+                    for sname, layers_data in image_metrics["scorers"].items()
+                },
+            }
+            json.dump(compact, f, indent=2)
 
     return image_metrics
 
@@ -402,8 +428,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", default=None, help="Override eval.output_dir.")
     p.add_argument("--device", default=None, choices=["cuda", "cpu"],
                    help="Override eval.device.")
-    p.add_argument("--scorer-type", default=None, choices=["cls", "patch", "both"],
-                   help="Override eval.scorer_type.")
+    p.add_argument(
+        "--scorer-type", default=None,
+        choices=["cls", "patch", "both", "patch_map_cls", "all"],
+        help="Override eval.scorer_type.",
+    )
     p.add_argument(
         "--layer", dest="layers", action="append", type=int, default=[],
         metavar="IDX",
@@ -411,6 +440,12 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--num-images", type=int, default=None,
                    help="Override eval.num_images.")
+    p.add_argument(
+        "--num-save-images", type=int, default=None,
+        metavar="N",
+        help="Override eval.num_save_images: save PNGs/metrics.json for N randomly "
+             "selected images; all images still contribute to aggregate stats.",
+    )
     return p.parse_args()
 
 
@@ -438,6 +473,8 @@ def main() -> None:
         config.model.target_layers = args.layers
     if args.num_images is not None:
         config.eval.num_images = args.num_images
+    if args.num_save_images is not None:
+        config.eval.num_save_images = args.num_save_images
 
     # Seed
     random.seed(config.seed)
@@ -469,8 +506,9 @@ def main() -> None:
     # Build scorers
     cls_scorer: CLSLensScorer | None = None
     patch_scorer: PatchLensScorer | None = None
+    patch_map_cls_scorer: PatchMapCLSLensScorer | None = None
 
-    if scorer_type in ("cls", "both"):
+    if scorer_type in ("cls", "both", "all"):
         print("Loading CLS lens scorer...")
         cls_scorer = CLSLensScorer(
             cls_lens_dir=config.lens.cls_lens_dir,
@@ -479,7 +517,7 @@ def main() -> None:
             device=device,
         )
 
-    if scorer_type in ("patch", "both"):
+    if scorer_type in ("patch", "both", "all"):
         print("Loading patch lens scorer...")
         patch_scorer = PatchLensScorer(
             patch_lens_dir=config.lens.patch_lens_dir,
@@ -489,9 +527,30 @@ def main() -> None:
             device=device,
         )
 
+    if scorer_type in ("patch_map_cls", "all"):
+        print("Loading patch map CLS lens scorer...")
+        patch_map_cls_scorer = PatchMapCLSLensScorer(
+            cls_lens_dir=config.lens.cls_lens_dir,
+            patch_map_dir=config.lens.patch_map_dir,
+            target_layers=target_layers,
+            device=device,
+        )
+
     # Collect images
     image_paths = _collect_images(config.eval, config.seed)
     print(f"Evaluating {len(image_paths)} image(s)...")
+
+    # Determine which images will have per-image outputs (PNGs + metrics.json) saved
+    n_save = config.eval.num_save_images
+    if n_save is None or n_save >= len(image_paths):
+        save_paths: set[str] = set(image_paths)
+    else:
+        rng = random.Random(config.seed)
+        save_paths = set(rng.sample(image_paths, n_save))
+    print(
+        f"Per-image outputs (PNGs/JSON) will be saved for "
+        f"{len(save_paths)}/{len(image_paths)} image(s)."
+    )
 
     # Determine which scorer names are active (for summary)
     active_scorer_names: list[str] = []
@@ -499,6 +558,8 @@ def main() -> None:
         active_scorer_names.append("cls")
     if patch_scorer is not None:
         active_scorer_names.append("patch")
+    if patch_map_cls_scorer is not None:
+        active_scorer_names.append("patch_map_cls")
 
     all_image_metrics: list[dict] = []
     transform = wrapper.get_transform()
@@ -568,11 +629,13 @@ def main() -> None:
                     blurred=blurred_i,
                     cls_scorer=cls_scorer,
                     patch_scorer=patch_scorer,
+                    patch_map_cls_scorer=patch_map_cls_scorer,
                     target_layers=target_layers,
                     config=config,
                     patch_size=patch_size,
                     device=device,
                     model=wrapper.model,
+                    save_outputs=image_path in save_paths,
                 )
                 all_image_metrics.append(metrics)
 

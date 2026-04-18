@@ -61,6 +61,7 @@ class LensSection:
     """Paths and settings for trained lens checkpoints."""
     cls_lens_dir: str = ""          # directory containing layer_*.pt CLS lens files
     patch_lens_dir: str = ""        # directory containing layer_*.pt patch lens files
+    patch_map_dir: str = ""         # directory containing layer_*.pt patch map checkpoints (for PatchMapCLSLensScorer)
     patch_neighbor_size: int = 3    # must match the value used during training
     patch_border: int = 2           # must match the value used during training
     means_path: str = ""            # .pt file with precomputed mean embeddings (for CLS scorer)
@@ -74,6 +75,7 @@ class EvalSection:
     image_dir: str = ""             # recursively scanned for .jpg/.jpeg/.png/.JPEG
 
     num_images: int | None = None   # None = all; positive int limits total images
+    num_save_images: int | None = None  # None = save all; positive int saves per-image PNGs/JSON for a random subset only
 
     output_dir: str = "outputs/attribution"
     device: str = "cuda"            # "cuda" or "cpu"

@@ -1,7 +1,7 @@
 """Lens-based patch attribution for vision transformers."""
 
 from .config import AttributionConfig, ModelSection, LensSection, EvalSection
-from .scorer import CLSLensScorer, PatchLensScorer, load_lens_checkpoint
+from .scorer import CLSLensScorer, PatchLensScorer, PatchMapCLSLensScorer, load_lens_checkpoint, load_patch_map_checkpoint
 from .metrics import insertion_curve, deletion_curve, apply_gaussian_blur
 from .visualize import (
     plot_heatmap,
@@ -18,7 +18,9 @@ __all__ = [
     "EvalSection",
     "CLSLensScorer",
     "PatchLensScorer",
+    "PatchMapCLSLensScorer",
     "load_lens_checkpoint",
+    "load_patch_map_checkpoint",
     "insertion_curve",
     "deletion_curve",
     "apply_gaussian_blur",
