@@ -88,14 +88,10 @@ class EvalSection:
     # Batch sizes
     # How many perturbed images to stack into one forward pass during
     # insertion/deletion curves.  Larger = faster (fewer GPU launches).
-    # Rule of thumb: as large as GPU VRAM allows (128–256 for ViT-L on 24 GB).
+    # Rule of thumb: as large as GPU VRAM allows (128–512 for ViT-L on 24 GB).
     perturbation_batch_size: int = 128
     # How many images to stack for the feature-extraction forward pass.
     extraction_batch_size: int = 8
-    # How many evaluation images to batch together for insertion/deletion inference.
-    # All their perturbed states are stacked into one [N*n_patches, C, H, W] tensor.
-    # Increase for better GPU utilisation; decrease if GPU runs out of memory.
-    perturbation_image_batch_size: int = 4
 
     # Visualization
     heatmap_colormap: str = "hot"

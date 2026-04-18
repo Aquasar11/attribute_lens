@@ -34,7 +34,7 @@ from tuned_lens.model import VisionModelWrapper
 
 from .config import AttributionConfig, EvalSection
 from .scorer import CLSLensScorer, PatchLensScorer, PatchMapCLSLensScorer, discover_lens_files
-from .metrics import apply_gaussian_blur, insertion_deletion_curves_batch
+from .metrics import apply_gaussian_blur, insertion_deletion_curves_all_layers
 from .visualize import (
     plot_heatmap,
     plot_heatmaps_grid,
@@ -184,17 +184,15 @@ def _run_batch_perturbations(
     batch_score_maps: list[dict],       # [{scorer: {layer: score_map}}] × N
     y_hats: list[int],
     active_scorer_names: list[str],
-    target_layers: list[int],
     patch_size: int,
     device: str,
     eval_batch_size: int,
-    image_batch_size: int,
 ) -> list[dict[str, dict[int, tuple]]]:
-    """Run insertion+deletion curves for all images, batched across images.
+    """Run insertion+deletion curves for all images.
 
-    For each (scorer, layer), images are grouped into sub-batches of
-    ``image_batch_size`` and processed together via
-    ``insertion_deletion_curves_batch``.
+    For each image, ALL layers are processed together in two forward passes
+    (one for all insertion states, one for all deletion states), via
+    ``insertion_deletion_curves_all_layers``.
 
     Returns a list (length N) of
     ``{scorer_name: {layer_idx: (ins_x, ins_y, ins_auc, del_x, del_y, del_auc)}}``.
@@ -202,37 +200,24 @@ def _run_batch_perturbations(
     N = len(y_hats)
     results: list[dict] = [{sn: {} for sn in active_scorer_names} for _ in range(N)]
 
-    combos = [(sn, li) for sn in active_scorer_names for li in target_layers]
-    pbar = tqdm(combos, desc="perturbations", unit="layer", leave=True)
+    pbar = tqdm(range(N), desc="ins+del", unit="img", leave=True)
+    for i in pbar:
+        for scorer_name in active_scorer_names:
+            score_maps_for_scorer = batch_score_maps[i].get(scorer_name, {})
+            if not score_maps_for_scorer:
+                continue
 
-    for scorer_name, layer_idx in pbar:
-        pbar.set_postfix(scorer=scorer_name, layer=layer_idx)
-
-        # Indices of images that have a score map for this (scorer, layer)
-        valid_idx = [
-            i for i in range(N)
-            if layer_idx in batch_score_maps[i].get(scorer_name, {})
-        ]
-        if not valid_idx:
-            continue
-
-        # Sub-batch across images
-        for sub_start in range(0, len(valid_idx), image_batch_size):
-            sub = valid_idx[sub_start: sub_start + image_batch_size]
-
-            sub_results = insertion_deletion_curves_batch(
+            layer_curves = insertion_deletion_curves_all_layers(
                 model=model,
-                originals=batch_tensor[sub],
-                blurreds=batch_blurred[sub],
-                score_maps=[batch_score_maps[i][scorer_name][layer_idx] for i in sub],
-                y_hats=[y_hats[i] for i in sub],
+                original=batch_tensor[i: i + 1],
+                blurred=batch_blurred[i: i + 1],
+                score_maps_by_layer=score_maps_for_scorer,
+                y_hat=y_hats[i],
                 patch_size=patch_size,
                 device=device,
                 eval_batch_size=eval_batch_size,
             )
-
-            for j, img_i in enumerate(sub):
-                results[img_i][scorer_name][layer_idx] = sub_results[j]
+            results[i][scorer_name] = layer_curves
 
     return results
 
@@ -482,12 +467,6 @@ def _parse_args() -> argparse.Namespace:
         help="Override eval.num_save_images: save PNGs/metrics.json for N randomly "
              "selected images; all images still contribute to aggregate stats.",
     )
-    p.add_argument(
-        "--perturbation-image-batch-size", type=int, default=None,
-        metavar="N",
-        help="Override eval.perturbation_image_batch_size: number of images batched "
-             "together for insertion/deletion inference.",
-    )
     return p.parse_args()
 
 
@@ -517,8 +496,6 @@ def main() -> None:
         config.eval.num_images = args.num_images
     if args.num_save_images is not None:
         config.eval.num_save_images = args.num_save_images
-    if args.perturbation_image_batch_size is not None:
-        config.eval.perturbation_image_batch_size = args.perturbation_image_batch_size
 
     # Seed
     random.seed(config.seed)
@@ -670,11 +647,9 @@ def main() -> None:
                 batch_score_maps=batch_score_maps,
                 y_hats=y_hats,
                 active_scorer_names=active_scorer_names,
-                target_layers=target_layers,
                 patch_size=patch_size,
                 device=device,
                 eval_batch_size=config.eval.perturbation_batch_size,
-                image_batch_size=config.eval.perturbation_image_batch_size,
             )
         except Exception as e:
             print(f"  [batch perturbation error] {e}")

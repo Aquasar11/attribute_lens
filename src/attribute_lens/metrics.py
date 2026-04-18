@@ -41,7 +41,6 @@ def apply_gaussian_blur(
     Returns:
         Blurred tensor of the same shape, on the same device.
     """
-    # Ensure kernel_size is odd
     if kernel_size % 2 == 0:
         kernel_size += 1
     blurred = gaussian_blur(image, kernel_size=[kernel_size, kernel_size], sigma=sigma)
@@ -100,20 +99,16 @@ def _build_perturbed_images(
     n_patches = len(rank_order)
     H_p = n_patches // grid_w
 
-    # rank_positions[flat_idx] = step at which that patch appears (0-indexed)
     rank_order_t = torch.tensor(rank_order, dtype=torch.long)
     rank_positions = torch.empty(n_patches, dtype=torch.long)
     rank_positions[rank_order_t] = torch.arange(n_patches)
     rank_positions = rank_positions.reshape(H_p, grid_w).to(device)  # [H_p, W_p]
 
-    # mask[k, r, c] = True when patch (r,c) has been applied by step k
     steps = torch.arange(n_patches, device=device).view(n_patches, 1, 1)  # [N, 1, 1]
     mask = (rank_positions.unsqueeze(0) <= steps)  # [N, H_p, W_p] bool
 
-    # Upsample from patch grid to pixel space
     mask = mask.repeat_interleave(patch_size, dim=1).repeat_interleave(patch_size, dim=2)
-    # [N, H, W] bool
-    mask = mask.unsqueeze(1)  # [N, 1, H, W] — broadcast over C
+    mask = mask.unsqueeze(1)  # [N, 1, H, W]
 
     C = patch_src.shape[1]
     imgs = torch.where(
@@ -157,7 +152,7 @@ def _run_batched_forward_multi_yhat(
 
 
 # ---------------------------------------------------------------------------
-# Insertion curve
+# Single-image curves (for external / one-off use)
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
@@ -171,10 +166,7 @@ def insertion_curve(
     device: str = "cpu",
     eval_batch_size: int = 128,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Compute insertion curve and AUC.
-
-    All N perturbed images are pre-built as a single ``[N, C, H, W]`` tensor
-    and then fed through the model in chunks of ``eval_batch_size``.
+    """Compute insertion curve and AUC for a single image / single layer.
 
     Returns:
         ``(fractions, probabilities, auc_value)``
@@ -192,10 +184,6 @@ def insertion_curve(
     return x, y, float(sklearn_auc(x, y))
 
 
-# ---------------------------------------------------------------------------
-# Deletion curve
-# ---------------------------------------------------------------------------
-
 @torch.no_grad()
 def deletion_curve(
     model: torch.nn.Module,
@@ -207,10 +195,7 @@ def deletion_curve(
     device: str = "cpu",
     eval_batch_size: int = 128,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Compute deletion curve and AUC.
-
-    All N perturbed images are pre-built as a single ``[N, C, H, W]`` tensor
-    and then fed through the model in chunks of ``eval_batch_size``.
+    """Compute deletion curve and AUC for a single image / single layer.
 
     Returns:
         ``(fractions, probabilities, auc_value)``
@@ -228,10 +213,6 @@ def deletion_curve(
     return x, y, float(sklearn_auc(x, y))
 
 
-# ---------------------------------------------------------------------------
-# Combined insertion + deletion (single rank computation, sequential passes)
-# ---------------------------------------------------------------------------
-
 @torch.no_grad()
 def insertion_deletion_curves(
     model: torch.nn.Module,
@@ -243,15 +224,7 @@ def insertion_deletion_curves(
     device: str = "cpu",
     eval_batch_size: int = 128,
 ) -> tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray, float]:
-    """Compute both insertion and deletion curves sharing one rank computation.
-
-    Pre-builds all N insertion images then all N deletion images as contiguous
-    tensors, running model forward passes in chunks.  Compared to calling
-    ``insertion_curve`` and ``deletion_curve`` separately this avoids
-    recomputing the patch ranking and reduces Python loop overhead.
-
-    Memory: at most ``[N, C, H, W]`` float32 on *device* at a time (~147 MB
-    for ViT-L/14 on 224×224 with N=256).
+    """Compute both curves for a single image / single layer.
 
     Returns:
         ``(ins_x, ins_y, ins_auc, del_x, del_y, del_auc)``
@@ -278,7 +251,82 @@ def insertion_deletion_curves(
 
 
 # ---------------------------------------------------------------------------
-# Batched insertion + deletion across multiple images
+# All-layers combined: two forward passes per image
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def insertion_deletion_curves_all_layers(
+    model: torch.nn.Module,
+    original: torch.Tensor,                        # [1, C, H, W]
+    blurred: torch.Tensor,                         # [1, C, H, W]
+    score_maps_by_layer: dict[int, torch.Tensor],  # {layer_idx: [H_p, W_p]}
+    y_hat: int,
+    patch_size: int,
+    device: str = "cpu",
+    eval_batch_size: int = 128,
+) -> dict[int, tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray, float]]:
+    """Compute insertion+deletion curves for ALL layers in two forward passes.
+
+    All L layers' perturbed sequences are concatenated into a single
+    ``[L * n_patches, C, H, W]`` tensor.  The model is run once over this
+    tensor for insertion and once for deletion — eliminating the per-layer
+    forward-pass loop entirely.
+
+    Peak GPU memory: ``[L * n_patches, C, H, W]`` float32 at a time.
+    For ViT-L/14 (224×224, 256 patches, 24 layers): 24 × 256 × ~0.6 MB ≈ 3.7 GB.
+
+    Args:
+        original:            ``[1, C, H, W]`` image tensor on any device.
+        blurred:             ``[1, C, H, W]`` blurred baseline.
+        score_maps_by_layer: Per-layer attribution maps ``{layer: [H_p, W_p]}``.
+        y_hat:               Predicted class index.
+        patch_size:          Pixel side length of each patch.
+        device:              Target device for model inference.
+        eval_batch_size:     Forward-pass chunk size (controls VRAM usage).
+
+    Returns:
+        ``{layer_idx: (ins_x, ins_y, ins_auc, del_x, del_y, del_auc)}``
+    """
+    layers = sorted(score_maps_by_layer.keys())
+    L = len(layers)
+    H_p, W_p = next(iter(score_maps_by_layer.values())).shape
+    n_patches = H_p * W_p
+    C, H, W = original.shape[1], original.shape[2], original.shape[3]
+
+    rank_orders = {l: _rank_patches(score_maps_by_layer[l]) for l in layers}
+
+    # ---- Pass 1: insertion (blurred → original) ----
+    all_ins = torch.empty(L * n_patches, C, H, W, device=device)
+    for k, l in enumerate(layers):
+        all_ins[k * n_patches: (k + 1) * n_patches] = _build_perturbed_images(
+            blurred, original, rank_orders[l], W_p, patch_size, device
+        )
+    ins_probs = _run_batched_forward(model, all_ins, y_hat, eval_batch_size)
+    del all_ins
+
+    # ---- Pass 2: deletion (original → blurred) ----
+    all_del = torch.empty(L * n_patches, C, H, W, device=device)
+    for k, l in enumerate(layers):
+        all_del[k * n_patches: (k + 1) * n_patches] = _build_perturbed_images(
+            original, blurred, rank_orders[l], W_p, patch_size, device
+        )
+    del_probs = _run_batched_forward(model, all_del, y_hat, eval_batch_size)
+    del all_del
+
+    x = np.linspace(1 / n_patches, 1.0, n_patches)
+    results: dict[int, tuple] = {}
+    for k, l in enumerate(layers):
+        ins_y = np.array(ins_probs[k * n_patches: (k + 1) * n_patches])
+        del_y = np.array(del_probs[k * n_patches: (k + 1) * n_patches])
+        results[l] = (
+            x, ins_y, float(sklearn_auc(x, ins_y)),
+            x, del_y, float(sklearn_auc(x, del_y)),
+        )
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Legacy: batched across multiple images (one layer at a time)
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
@@ -292,23 +340,10 @@ def insertion_deletion_curves_batch(
     device: str = "cpu",
     eval_batch_size: int = 128,
 ) -> list[tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray, float]]:
-    """Compute insertion+deletion curves for N images in one set of forward passes.
+    """Compute insertion+deletion for N images at a single layer.
 
-    All N images' perturbed states are stacked into a single
-    ``[N * n_patches, C, H, W]`` tensor so the model processes them together,
-    improving GPU utilisation over N separate single-image calls.
-
-    Memory peak: ``[N * n_patches, C, H, W]`` float32 at a time
-    (~147 MB × N for ViT-L/14 on 224×224 with n_patches=256).
-
-    Args:
-        originals: Original images ``[N, C, H, W]`` on any device.
-        blurreds:  Blurred baselines ``[N, C, H, W]``.
-        score_maps: Per-image score maps (one ``[H_p, W_p]`` tensor each).
-        y_hats:    Predicted class index for each image.
-        patch_size: Pixel side length of each patch.
-        device:    Target device for model inference.
-        eval_batch_size: Chunk size for model forward passes.
+    All N images' perturbed states are stacked into ``[N * n_patches, C, H, W]``
+    and processed together.  Kept for external / single-layer use.
 
     Returns:
         List of N tuples ``(ins_x, ins_y, ins_auc, del_x, del_y, del_auc)``.
@@ -319,8 +354,6 @@ def insertion_deletion_curves_batch(
 
     rank_orders = [_rank_patches(sm) for sm in score_maps]
 
-    # Build [N * n_patches, C, H, W] for insertion — one image's slice at a time
-    # to cap peak memory at (N+1) * [n_patches, C, H, W]
     C, H, W = originals.shape[1], originals.shape[2], originals.shape[3]
     all_ins = torch.empty(N * n_patches, C, H, W, device=device)
     for i in range(N):
@@ -328,26 +361,25 @@ def insertion_deletion_curves_batch(
             blurreds[i: i + 1], originals[i: i + 1], rank_orders[i], W_p, patch_size, device
         )
 
-    y_hats_ins = torch.tensor(
+    y_hats_t = torch.tensor(
         [yh for yh in y_hats for _ in range(n_patches)],
         dtype=torch.long, device=device,
     )
-    ins_probs = _run_batched_forward_multi_yhat(model, all_ins, y_hats_ins, eval_batch_size)
-    del all_ins, y_hats_ins
+    ins_probs = _run_batched_forward_multi_yhat(model, all_ins, y_hats_t, eval_batch_size)
+    del all_ins
 
-    # Same for deletion
     all_del = torch.empty(N * n_patches, C, H, W, device=device)
     for i in range(N):
         all_del[i * n_patches: (i + 1) * n_patches] = _build_perturbed_images(
             originals[i: i + 1], blurreds[i: i + 1], rank_orders[i], W_p, patch_size, device
         )
 
-    y_hats_del = torch.tensor(
+    y_hats_t2 = torch.tensor(
         [yh for yh in y_hats for _ in range(n_patches)],
         dtype=torch.long, device=device,
     )
-    del_probs = _run_batched_forward_multi_yhat(model, all_del, y_hats_del, eval_batch_size)
-    del all_del, y_hats_del
+    del_probs = _run_batched_forward_multi_yhat(model, all_del, y_hats_t2, eval_batch_size)
+    del all_del
 
     x = np.linspace(1 / n_patches, 1.0, n_patches)
     results = []
