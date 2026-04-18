@@ -14,8 +14,8 @@ lens:
 eval:
   image_paths: []             # explicit image file paths (takes precedence over image_dir)
   image_dir: "/opt/models/datasets/imagenet/extracted/val"  # ImageNet val split (same root as tuned_lens configs)
-  num_images: null            # null = all; or set e.g. 5000 to limit evaluation
-  num_save_images: 50         # save PNGs/metrics.json for this many random images; null = save all
+  num_images: 500            # null = all; or set e.g. 5000 to limit evaluation
+  num_save_images: 20         # save PNGs/metrics.json for this many random images; null = save all
   output_dir: "outputs/attribution"
   device: "cuda"              # "cuda" or "cpu"
   scorer_type: "patch_map_cls"         # "cls" | "patch" | "both" | "patch_map_cls" | "all"

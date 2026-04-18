@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image
+from tqdm import tqdm
 
 from tuned_lens.config import ModelConfig
 from tuned_lens.model import VisionModelWrapper
@@ -201,33 +202,37 @@ def _run_batch_perturbations(
     N = len(y_hats)
     results: list[dict] = [{sn: {} for sn in active_scorer_names} for _ in range(N)]
 
-    for scorer_name in active_scorer_names:
-        for layer_idx in target_layers:
-            # Indices of images that have a score map for this (scorer, layer)
-            valid_idx = [
-                i for i in range(N)
-                if layer_idx in batch_score_maps[i].get(scorer_name, {})
-            ]
-            if not valid_idx:
-                continue
+    combos = [(sn, li) for sn in active_scorer_names for li in target_layers]
+    pbar = tqdm(combos, desc="perturbations", unit="layer", leave=True)
 
-            # Sub-batch across images
-            for sub_start in range(0, len(valid_idx), image_batch_size):
-                sub = valid_idx[sub_start: sub_start + image_batch_size]
+    for scorer_name, layer_idx in pbar:
+        pbar.set_postfix(scorer=scorer_name, layer=layer_idx)
 
-                sub_results = insertion_deletion_curves_batch(
-                    model=model,
-                    originals=batch_tensor[sub],
-                    blurreds=batch_blurred[sub],
-                    score_maps=[batch_score_maps[i][scorer_name][layer_idx] for i in sub],
-                    y_hats=[y_hats[i] for i in sub],
-                    patch_size=patch_size,
-                    device=device,
-                    eval_batch_size=eval_batch_size,
-                )
+        # Indices of images that have a score map for this (scorer, layer)
+        valid_idx = [
+            i for i in range(N)
+            if layer_idx in batch_score_maps[i].get(scorer_name, {})
+        ]
+        if not valid_idx:
+            continue
 
-                for j, img_i in enumerate(sub):
-                    results[img_i][scorer_name][layer_idx] = sub_results[j]
+        # Sub-batch across images
+        for sub_start in range(0, len(valid_idx), image_batch_size):
+            sub = valid_idx[sub_start: sub_start + image_batch_size]
+
+            sub_results = insertion_deletion_curves_batch(
+                model=model,
+                originals=batch_tensor[sub],
+                blurreds=batch_blurred[sub],
+                score_maps=[batch_score_maps[i][scorer_name][layer_idx] for i in sub],
+                y_hats=[y_hats[i] for i in sub],
+                patch_size=patch_size,
+                device=device,
+                eval_batch_size=eval_batch_size,
+            )
+
+            for j, img_i in enumerate(sub):
+                results[img_i][scorer_name][layer_idx] = sub_results[j]
 
     return results
 
@@ -610,7 +615,8 @@ def main() -> None:
     # Process images in extraction batches to amortise the feature-extraction
     # forward pass; insertion/deletion curves are still per-image.
     processed = 0
-    for batch_start in range(0, n_total, extr_bs):
+    batch_pbar = tqdm(range(0, n_total, extr_bs), desc="extraction batches", unit="batch")
+    for batch_start in batch_pbar:
         batch_paths = image_paths[batch_start: batch_start + extr_bs]
 
         # Load and transform images
@@ -678,7 +684,7 @@ def main() -> None:
         # Per-image output saving and metrics collection
         for i, (image_path, pil_img) in enumerate(zip(valid_paths, pil_imgs)):
             processed += 1
-            print(f"[{processed}/{n_total}] {image_path}")
+            tqdm.write(f"[{processed}/{n_total}] {image_path}")
 
             try:
                 metrics = _evaluate_image(
@@ -696,7 +702,7 @@ def main() -> None:
 
                 for sname, layers_data in metrics["scorers"].items():
                     for lidx, ldata in sorted(layers_data.items()):
-                        print(
+                        tqdm.write(
                             f"  {sname} layer {lidx}: "
                             f"insertion={ldata['insertion_auc']:.4f}  "
                             f"deletion={ldata['deletion_auc']:.4f}"
