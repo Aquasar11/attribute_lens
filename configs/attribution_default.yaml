@@ -6,7 +6,7 @@ model:
 lens:
   cls_lens_dir: "outputs/affine_kld/best_lenses"
   patch_lens_dir: "outputs/patch_affine_kld/best_lenses"
-  patch_map_dir: "outputs/patch_map_lowrank/best_lenses"           # directory with layer_*.pt patch map checkpoints (for patch_map_cls scorer)
+  patch_map_dir: "outputs/patch_map_lowrank/best_maps"           # directory with layer_*.pt patch map checkpoints (for patch_map_cls scorer)
   patch_neighbor_size: 3      # must match training config (k)
   patch_border: 2             # must match training config
   means_path: ""  # required when scorer_type includes "cls"
@@ -22,7 +22,8 @@ eval:
   blur_kernel_size: 55        # Gaussian blur kernel for insertion/deletion baseline
   blur_sigma: 10.0
   perturbation_batch_size: 128  # perturbed images per forward pass in insertion/deletion curves
-  extraction_batch_size: 64      # images batched together for feature extraction
+  extraction_batch_size: 64     # images batched together for feature extraction
+  perturbation_image_batch_size: 4  # evaluation images batched together for insertion/deletion inference
   heatmap_colormap: "hot"
   heatmap_alpha: 0.6
   plot_dpi: 150

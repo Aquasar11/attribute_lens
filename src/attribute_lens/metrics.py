@@ -68,13 +68,92 @@ def _rank_patches(score_map: torch.Tensor) -> list[int]:
     valid_idx = (~nan_mask).nonzero(as_tuple=True)[0]
     nan_idx = nan_mask.nonzero(as_tuple=True)[0]
 
-    # Sort valid indices by descending score
     valid_scores = flat[valid_idx]
     order = torch.argsort(valid_scores, descending=True)
     sorted_valid = valid_idx[order].tolist()
     sorted_nan = nan_idx.tolist()
 
     return sorted_valid + sorted_nan
+
+
+def _build_perturbed_images(
+    base: torch.Tensor,
+    patch_src: torch.Tensor,
+    rank_order: list[int],
+    grid_w: int,
+    patch_size: int,
+    device: str,
+) -> torch.Tensor:
+    """Pre-build all N cumulative perturbed images as ``[N, C, H, W]``.
+
+    Image *k* has the first *k+1* patches (``rank_order[0..k]``) taken from
+    ``patch_src``; all other pixels come from ``base``.
+
+    Fully vectorized — no Python loop.  A boolean patch-rank mask is
+    upsampled to pixel space and passed to ``torch.where``:
+
+    1. ``rank_positions[r, c]`` = step at which patch (r, c) is applied.
+    2. ``mask[k, r, c]`` = (rank_positions[r, c] <= k) — True once applied.
+    3. Upsample with ``repeat_interleave`` to pixel resolution.
+    4. ``imgs = where(mask, patch_src, base)`` — single fused op.
+    """
+    n_patches = len(rank_order)
+    H_p = n_patches // grid_w
+
+    # rank_positions[flat_idx] = step at which that patch appears (0-indexed)
+    rank_order_t = torch.tensor(rank_order, dtype=torch.long)
+    rank_positions = torch.empty(n_patches, dtype=torch.long)
+    rank_positions[rank_order_t] = torch.arange(n_patches)
+    rank_positions = rank_positions.reshape(H_p, grid_w).to(device)  # [H_p, W_p]
+
+    # mask[k, r, c] = True when patch (r,c) has been applied by step k
+    steps = torch.arange(n_patches, device=device).view(n_patches, 1, 1)  # [N, 1, 1]
+    mask = (rank_positions.unsqueeze(0) <= steps)  # [N, H_p, W_p] bool
+
+    # Upsample from patch grid to pixel space
+    mask = mask.repeat_interleave(patch_size, dim=1).repeat_interleave(patch_size, dim=2)
+    # [N, H, W] bool
+    mask = mask.unsqueeze(1)  # [N, 1, H, W] — broadcast over C
+
+    C = patch_src.shape[1]
+    imgs = torch.where(
+        mask.expand(-1, C, -1, -1),
+        patch_src.to(device).expand(n_patches, -1, -1, -1),
+        base.to(device).expand(n_patches, -1, -1, -1),
+    )  # [N, C, H, W]
+    return imgs
+
+
+def _run_batched_forward(
+    model: torch.nn.Module,
+    imgs: torch.Tensor,
+    y_hat: int,
+    batch_size: int,
+) -> list[float]:
+    """Run *model* on *imgs* in chunks of *batch_size*, return P(y_hat) list."""
+    probs: list[float] = []
+    for i in range(0, len(imgs), batch_size):
+        chunk = imgs[i: i + batch_size]
+        logits = model(chunk)
+        probs.extend(F.softmax(logits, dim=-1)[:, y_hat].cpu().tolist())
+    return probs
+
+
+def _run_batched_forward_multi_yhat(
+    model: torch.nn.Module,
+    imgs: torch.Tensor,       # [N_total, C, H, W]
+    y_hats: torch.Tensor,     # [N_total] long — one y_hat per image
+    batch_size: int,
+) -> list[float]:
+    """Like ``_run_batched_forward`` but each image has its own y_hat."""
+    probs: list[float] = []
+    for i in range(0, len(imgs), batch_size):
+        chunk = imgs[i: i + batch_size]
+        y_chunk = y_hats[i: i + batch_size]
+        logits = model(chunk)
+        p = F.softmax(logits, dim=-1)[torch.arange(len(chunk), device=logits.device), y_chunk]
+        probs.extend(p.cpu().tolist())
+    return probs
 
 
 # ---------------------------------------------------------------------------
@@ -92,66 +171,24 @@ def insertion_curve(
     device: str = "cpu",
     eval_batch_size: int = 128,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Compute insertion curve and AUC with batched model inference.
+    """Compute insertion curve and AUC.
 
-    Starts from ``blurred`` and sequentially restores the ``original`` image
-    patch by patch, ordered by descending score.  Perturbed images are
-    accumulated into a batch of size ``eval_batch_size`` before a single
-    forward pass, reducing GPU launches from ``n_patches`` to
-    ``ceil(n_patches / eval_batch_size)``.
-
-    Args:
-        model: The frozen backbone (``VisionModelWrapper.model``).
-        original: Pre-processed original image ``[1, C, H, W]``.
-        blurred: Gaussian-blurred version ``[1, C, H, W]`` (same normalisation).
-        score_map: ``[H_patches, W_patches]`` patch importance scores.  NaN =
-            treat as least important.
-        y_hat: Class index to track.
-        patch_size: Pixel side length of each patch (e.g. 14 for ViT-L/14).
-        device: Device for model inference.
-        eval_batch_size: Number of perturbed images per forward pass.
+    All N perturbed images are pre-built as a single ``[N, C, H, W]`` tensor
+    and then fed through the model in chunks of ``eval_batch_size``.
 
     Returns:
-        ``(fractions, probabilities, auc_value)`` — fraction of patches inserted,
-        model probability at that step, and the area under the curve.
+        ``(fractions, probabilities, auc_value)``
     """
     H_p, W_p = score_map.shape
     n_patches = H_p * W_p
     rank_order = _rank_patches(score_map)
 
-    current = blurred.clone().to(device)
-    orig_dev = original.to(device)
+    imgs = _build_perturbed_images(blurred, original, rank_order, W_p, patch_size, device)
+    probs = _run_batched_forward(model, imgs, y_hat, eval_batch_size)
+    del imgs
 
-    fractions: list[float] = []
-    probabilities: list[float] = []
-
-    step = 0
-    while step < n_patches:
-        batch_imgs: list[torch.Tensor] = []
-        batch_steps: list[int] = []
-
-        # Apply patches sequentially and snapshot each intermediate state
-        for _ in range(eval_batch_size):
-            if step >= n_patches:
-                break
-            pidx = rank_order[step]
-            y0, y1, x0, x1 = _patch_coords(pidx, W_p, patch_size)
-            current[:, :, y0:y1, x0:x1] = orig_dev[:, :, y0:y1, x0:x1]
-            batch_imgs.append(current.clone())
-            batch_steps.append(step)
-            step += 1
-
-        # Single forward pass for the whole chunk
-        batch_tensor = torch.cat(batch_imgs, dim=0)        # [B, C, H, W]
-        logits = model(batch_tensor)
-        probs = F.softmax(logits, dim=-1)[:, y_hat].cpu().tolist()
-
-        for s, prob in zip(batch_steps, probs):
-            fractions.append((s + 1) / n_patches)
-            probabilities.append(float(prob))
-
-    x = np.array(fractions)
-    y = np.array(probabilities)
+    x = np.linspace(1 / n_patches, 1.0, n_patches)
+    y = np.array(probs)
     return x, y, float(sklearn_auc(x, y))
 
 
@@ -170,59 +207,155 @@ def deletion_curve(
     device: str = "cpu",
     eval_batch_size: int = 128,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Compute deletion curve and AUC with batched model inference.
+    """Compute deletion curve and AUC.
 
-    Starts from ``original`` and sequentially replaces patches with the
-    ``blurred`` baseline, ordered by descending score.  Perturbed images are
-    accumulated into a batch of size ``eval_batch_size`` before a single
-    forward pass.
-
-    Args:
-        model: The frozen backbone.
-        original: Pre-processed original image ``[1, C, H, W]``.
-        blurred: Gaussian-blurred version (same normalisation).
-        score_map: ``[H_patches, W_patches]`` patch importance scores.
-        y_hat: Class index to track.
-        patch_size: Pixel side length of each patch.
-        device: Device for model inference.
-        eval_batch_size: Number of perturbed images per forward pass.
+    All N perturbed images are pre-built as a single ``[N, C, H, W]`` tensor
+    and then fed through the model in chunks of ``eval_batch_size``.
 
     Returns:
-        ``(fractions, probabilities, auc_value)``.
+        ``(fractions, probabilities, auc_value)``
     """
     H_p, W_p = score_map.shape
     n_patches = H_p * W_p
     rank_order = _rank_patches(score_map)
 
-    current = original.clone().to(device)
-    blur_dev = blurred.to(device)
+    imgs = _build_perturbed_images(original, blurred, rank_order, W_p, patch_size, device)
+    probs = _run_batched_forward(model, imgs, y_hat, eval_batch_size)
+    del imgs
 
-    fractions: list[float] = []
-    probabilities: list[float] = []
-
-    step = 0
-    while step < n_patches:
-        batch_imgs: list[torch.Tensor] = []
-        batch_steps: list[int] = []
-
-        for _ in range(eval_batch_size):
-            if step >= n_patches:
-                break
-            pidx = rank_order[step]
-            y0, y1, x0, x1 = _patch_coords(pidx, W_p, patch_size)
-            current[:, :, y0:y1, x0:x1] = blur_dev[:, :, y0:y1, x0:x1]
-            batch_imgs.append(current.clone())
-            batch_steps.append(step)
-            step += 1
-
-        batch_tensor = torch.cat(batch_imgs, dim=0)        # [B, C, H, W]
-        logits = model(batch_tensor)
-        probs = F.softmax(logits, dim=-1)[:, y_hat].cpu().tolist()
-
-        for s, prob in zip(batch_steps, probs):
-            fractions.append((s + 1) / n_patches)
-            probabilities.append(float(prob))
-
-    x = np.array(fractions)
-    y = np.array(probabilities)
+    x = np.linspace(1 / n_patches, 1.0, n_patches)
+    y = np.array(probs)
     return x, y, float(sklearn_auc(x, y))
+
+
+# ---------------------------------------------------------------------------
+# Combined insertion + deletion (single rank computation, sequential passes)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def insertion_deletion_curves(
+    model: torch.nn.Module,
+    original: torch.Tensor,
+    blurred: torch.Tensor,
+    score_map: torch.Tensor,
+    y_hat: int,
+    patch_size: int,
+    device: str = "cpu",
+    eval_batch_size: int = 128,
+) -> tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray, float]:
+    """Compute both insertion and deletion curves sharing one rank computation.
+
+    Pre-builds all N insertion images then all N deletion images as contiguous
+    tensors, running model forward passes in chunks.  Compared to calling
+    ``insertion_curve`` and ``deletion_curve`` separately this avoids
+    recomputing the patch ranking and reduces Python loop overhead.
+
+    Memory: at most ``[N, C, H, W]`` float32 on *device* at a time (~147 MB
+    for ViT-L/14 on 224×224 with N=256).
+
+    Returns:
+        ``(ins_x, ins_y, ins_auc, del_x, del_y, del_auc)``
+    """
+    H_p, W_p = score_map.shape
+    n_patches = H_p * W_p
+    rank_order = _rank_patches(score_map)
+    x = np.linspace(1 / n_patches, 1.0, n_patches)
+
+    ins_imgs = _build_perturbed_images(blurred, original, rank_order, W_p, patch_size, device)
+    ins_probs = _run_batched_forward(model, ins_imgs, y_hat, eval_batch_size)
+    del ins_imgs
+
+    del_imgs = _build_perturbed_images(original, blurred, rank_order, W_p, patch_size, device)
+    del_probs = _run_batched_forward(model, del_imgs, y_hat, eval_batch_size)
+    del del_imgs
+
+    ins_y = np.array(ins_probs)
+    del_y = np.array(del_probs)
+    return (
+        x, ins_y, float(sklearn_auc(x, ins_y)),
+        x, del_y, float(sklearn_auc(x, del_y)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Batched insertion + deletion across multiple images
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def insertion_deletion_curves_batch(
+    model: torch.nn.Module,
+    originals: torch.Tensor,           # [N, C, H, W]
+    blurreds: torch.Tensor,            # [N, C, H, W]
+    score_maps: list[torch.Tensor],    # N × [H_p, W_p]
+    y_hats: list[int],                 # length N
+    patch_size: int,
+    device: str = "cpu",
+    eval_batch_size: int = 128,
+) -> list[tuple[np.ndarray, np.ndarray, float, np.ndarray, np.ndarray, float]]:
+    """Compute insertion+deletion curves for N images in one set of forward passes.
+
+    All N images' perturbed states are stacked into a single
+    ``[N * n_patches, C, H, W]`` tensor so the model processes them together,
+    improving GPU utilisation over N separate single-image calls.
+
+    Memory peak: ``[N * n_patches, C, H, W]`` float32 at a time
+    (~147 MB × N for ViT-L/14 on 224×224 with n_patches=256).
+
+    Args:
+        originals: Original images ``[N, C, H, W]`` on any device.
+        blurreds:  Blurred baselines ``[N, C, H, W]``.
+        score_maps: Per-image score maps (one ``[H_p, W_p]`` tensor each).
+        y_hats:    Predicted class index for each image.
+        patch_size: Pixel side length of each patch.
+        device:    Target device for model inference.
+        eval_batch_size: Chunk size for model forward passes.
+
+    Returns:
+        List of N tuples ``(ins_x, ins_y, ins_auc, del_x, del_y, del_auc)``.
+    """
+    N = originals.shape[0]
+    H_p, W_p = score_maps[0].shape
+    n_patches = H_p * W_p
+
+    rank_orders = [_rank_patches(sm) for sm in score_maps]
+
+    # Build [N * n_patches, C, H, W] for insertion — one image's slice at a time
+    # to cap peak memory at (N+1) * [n_patches, C, H, W]
+    C, H, W = originals.shape[1], originals.shape[2], originals.shape[3]
+    all_ins = torch.empty(N * n_patches, C, H, W, device=device)
+    for i in range(N):
+        all_ins[i * n_patches: (i + 1) * n_patches] = _build_perturbed_images(
+            blurreds[i: i + 1], originals[i: i + 1], rank_orders[i], W_p, patch_size, device
+        )
+
+    y_hats_ins = torch.tensor(
+        [yh for yh in y_hats for _ in range(n_patches)],
+        dtype=torch.long, device=device,
+    )
+    ins_probs = _run_batched_forward_multi_yhat(model, all_ins, y_hats_ins, eval_batch_size)
+    del all_ins, y_hats_ins
+
+    # Same for deletion
+    all_del = torch.empty(N * n_patches, C, H, W, device=device)
+    for i in range(N):
+        all_del[i * n_patches: (i + 1) * n_patches] = _build_perturbed_images(
+            originals[i: i + 1], blurreds[i: i + 1], rank_orders[i], W_p, patch_size, device
+        )
+
+    y_hats_del = torch.tensor(
+        [yh for yh in y_hats for _ in range(n_patches)],
+        dtype=torch.long, device=device,
+    )
+    del_probs = _run_batched_forward_multi_yhat(model, all_del, y_hats_del, eval_batch_size)
+    del all_del, y_hats_del
+
+    x = np.linspace(1 / n_patches, 1.0, n_patches)
+    results = []
+    for i in range(N):
+        ins_y = np.array(ins_probs[i * n_patches: (i + 1) * n_patches])
+        del_y = np.array(del_probs[i * n_patches: (i + 1) * n_patches])
+        results.append((
+            x, ins_y, float(sklearn_auc(x, ins_y)),
+            x, del_y, float(sklearn_auc(x, del_y)),
+        ))
+    return results

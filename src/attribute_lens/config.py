@@ -92,6 +92,10 @@ class EvalSection:
     perturbation_batch_size: int = 128
     # How many images to stack for the feature-extraction forward pass.
     extraction_batch_size: int = 8
+    # How many evaluation images to batch together for insertion/deletion inference.
+    # All their perturbed states are stacked into one [N*n_patches, C, H, W] tensor.
+    # Increase for better GPU utilisation; decrease if GPU runs out of memory.
+    perturbation_image_batch_size: int = 4
 
     # Visualization
     heatmap_colormap: str = "hot"

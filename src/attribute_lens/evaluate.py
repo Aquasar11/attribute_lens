@@ -33,7 +33,7 @@ from tuned_lens.model import VisionModelWrapper
 
 from .config import AttributionConfig, EvalSection
 from .scorer import CLSLensScorer, PatchLensScorer, PatchMapCLSLensScorer, discover_lens_files
-from .metrics import apply_gaussian_blur, insertion_curve, deletion_curve
+from .metrics import apply_gaussian_blur, insertion_deletion_curves_batch
 from .visualize import (
     plot_heatmap,
     plot_heatmaps_grid,
@@ -153,92 +153,133 @@ def _infer_patch_size(wrapper: VisionModelWrapper) -> int:
     return wrapper.model.patch_embed.patch_size[0]
 
 
+# ---------------------------------------------------------------------------
+# Batch helpers: score map computation and perturbation curves
+# ---------------------------------------------------------------------------
+
+def _compute_batch_score_maps(
+    batch_patch_states: dict[int, torch.Tensor],
+    y_hats: list[int],
+    active_scorers_list: list[tuple[str, object]],
+    n_images: int,
+) -> list[dict[str, dict[int, torch.Tensor]]]:
+    """Compute score maps for all images in the extraction batch.
+
+    Returns a list (length ``n_images``) of
+    ``{scorer_name: {layer_idx: score_map [H_p, W_p]}}``.
+    """
+    result: list[dict] = [{} for _ in range(n_images)]
+    for i in range(n_images):
+        patch_states_i = {l: batch_patch_states[l][i: i + 1] for l in batch_patch_states}
+        for scorer_name, scorer in active_scorers_list:
+            result[i][scorer_name] = scorer.score_all_layers(patch_states_i, y_hats[i])  # type: ignore[attr-defined]
+    return result
+
+
+def _run_batch_perturbations(
+    model: torch.nn.Module,
+    batch_tensor: torch.Tensor,         # [N, C, H, W]
+    batch_blurred: torch.Tensor,        # [N, C, H, W]
+    batch_score_maps: list[dict],       # [{scorer: {layer: score_map}}] × N
+    y_hats: list[int],
+    active_scorer_names: list[str],
+    target_layers: list[int],
+    patch_size: int,
+    device: str,
+    eval_batch_size: int,
+    image_batch_size: int,
+) -> list[dict[str, dict[int, tuple]]]:
+    """Run insertion+deletion curves for all images, batched across images.
+
+    For each (scorer, layer), images are grouped into sub-batches of
+    ``image_batch_size`` and processed together via
+    ``insertion_deletion_curves_batch``.
+
+    Returns a list (length N) of
+    ``{scorer_name: {layer_idx: (ins_x, ins_y, ins_auc, del_x, del_y, del_auc)}}``.
+    """
+    N = len(y_hats)
+    results: list[dict] = [{sn: {} for sn in active_scorer_names} for _ in range(N)]
+
+    for scorer_name in active_scorer_names:
+        for layer_idx in target_layers:
+            # Indices of images that have a score map for this (scorer, layer)
+            valid_idx = [
+                i for i in range(N)
+                if layer_idx in batch_score_maps[i].get(scorer_name, {})
+            ]
+            if not valid_idx:
+                continue
+
+            # Sub-batch across images
+            for sub_start in range(0, len(valid_idx), image_batch_size):
+                sub = valid_idx[sub_start: sub_start + image_batch_size]
+
+                sub_results = insertion_deletion_curves_batch(
+                    model=model,
+                    originals=batch_tensor[sub],
+                    blurreds=batch_blurred[sub],
+                    score_maps=[batch_score_maps[i][scorer_name][layer_idx] for i in sub],
+                    y_hats=[y_hats[i] for i in sub],
+                    patch_size=patch_size,
+                    device=device,
+                    eval_batch_size=eval_batch_size,
+                )
+
+                for j, img_i in enumerate(sub):
+                    results[img_i][scorer_name][layer_idx] = sub_results[j]
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Per-image output saving (visualization + metrics JSON)
+# ---------------------------------------------------------------------------
+
 def _evaluate_image(
     image_path: str,
     pil_img: Image.Image,
-    image_tensor: torch.Tensor,
-    patch_states: dict[int, torch.Tensor],
     y_hat: int,
-    blurred: torch.Tensor,
-    cls_scorer: CLSLensScorer | None,
-    patch_scorer: PatchLensScorer | None,
-    patch_map_cls_scorer: PatchMapCLSLensScorer | None,
+    score_maps_by_scorer: dict[str, dict[int, torch.Tensor]],
+    curves_by_scorer: dict[str, dict[int, tuple]],
+    active_scorer_names: list[str],
     target_layers: list[int],
     config: AttributionConfig,
-    patch_size: int,
-    device: str,
-    model: torch.nn.Module,
     save_outputs: bool = True,
 ) -> dict:
-    """Run full attribution pipeline on a single image.
-
-    Pre-computed inputs (``patch_states``, ``y_hat``, ``blurred``) are passed
-    in so that the caller can amortise the extraction forward pass across a
-    batch of images.
+    """Save per-image outputs and collect metrics from pre-computed scores/curves.
 
     Args:
-        save_outputs: If False, skip all per-image file I/O (PNGs, metrics.json).
-            Metrics are still computed and returned for aggregate statistics.
+        score_maps_by_scorer: ``{scorer_name: {layer_idx: Tensor[H_p, W_p]}}``.
+        curves_by_scorer: ``{scorer_name: {layer_idx: (ins_x, ins_y, ins_auc,
+            del_x, del_y, del_auc)}}``.
+        save_outputs: If False, skip all file I/O; metrics are still returned.
 
-    Returns a dict with per-scorer, per-layer AUC values.
+    Returns:
+        Dict with per-scorer, per-layer AUC values for aggregate summary.
     """
     stem = Path(image_path).stem
     out_root = config.eval.output_dir
 
-    image_metrics: dict = {
-        "image_path": image_path,
-        "y_hat": y_hat,
-        "scorers": {},
-    }
+    image_metrics: dict = {"image_path": image_path, "y_hat": y_hat, "scorers": {}}
 
-    active_scorers: list[tuple[str, CLSLensScorer | PatchLensScorer | PatchMapCLSLensScorer]] = []
-    if cls_scorer is not None:
-        active_scorers.append(("cls", cls_scorer))
-    if patch_scorer is not None:
-        active_scorers.append(("patch", patch_scorer))
-    if patch_map_cls_scorer is not None:
-        active_scorers.append(("patch_map_cls", patch_map_cls_scorer))
+    for scorer_name in active_scorer_names:
+        scorer_maps = score_maps_by_scorer.get(scorer_name, {})
+        scorer_curves = curves_by_scorer.get(scorer_name, {})
 
-    for scorer_name, scorer in active_scorers:
         if save_outputs:
             scorer_dir = os.path.join(out_root, stem, scorer_name)
             os.makedirs(scorer_dir, exist_ok=True)
-
-        score_maps = scorer.score_all_layers(patch_states, y_hat)
 
         layer_metrics: dict[int, dict] = {}
         all_score_maps_np: dict[int, np.ndarray] = {}
 
         for layer_idx in target_layers:
-            if layer_idx not in score_maps:
+            if layer_idx not in scorer_maps or layer_idx not in scorer_curves:
                 continue
-            sm = score_maps[layer_idx].cpu().numpy()
-            if save_outputs:
-                all_score_maps_np[layer_idx] = sm
 
-            # Insertion curve
-            ins_x, ins_y, ins_auc = insertion_curve(
-                model=model,
-                original=image_tensor,
-                blurred=blurred,
-                score_map=score_maps[layer_idx],
-                y_hat=y_hat,
-                patch_size=patch_size,
-                device=device,
-                eval_batch_size=config.eval.perturbation_batch_size,
-            )
-
-            # Deletion curve
-            del_x, del_y, del_auc = deletion_curve(
-                model=model,
-                original=image_tensor,
-                blurred=blurred,
-                score_map=score_maps[layer_idx],
-                y_hat=y_hat,
-                patch_size=patch_size,
-                device=device,
-                eval_batch_size=config.eval.perturbation_batch_size,
-            )
+            sm = scorer_maps[layer_idx].cpu().numpy()
+            ins_x, ins_y, ins_auc, del_x, del_y, del_auc = scorer_curves[layer_idx]
 
             layer_metrics[layer_idx] = {
                 "insertion_auc": ins_auc,
@@ -250,7 +291,8 @@ def _evaluate_image(
             }
 
             if save_outputs:
-                # Save per-layer heatmap
+                all_score_maps_np[layer_idx] = sm
+
                 plot_heatmap(
                     pil_img, sm,
                     output_path=os.path.join(scorer_dir, f"layer_{layer_idx}_heatmap.png"),
@@ -259,21 +301,14 @@ def _evaluate_image(
                     alpha=config.eval.heatmap_alpha,
                     dpi=config.eval.plot_dpi,
                 )
-
-                # Save per-layer insertion/deletion curves
                 plot_curves(
-                    ins_x, ins_y, ins_auc,
-                    del_x, del_y, del_auc,
+                    ins_x, ins_y, ins_auc, del_x, del_y, del_auc,
                     output_path=os.path.join(scorer_dir, f"layer_{layer_idx}_curves.png"),
                     title=f"{scorer_name} | layer {layer_idx} | y_hat={y_hat}",
                     dpi=config.eval.plot_dpi,
                 )
-
-                # Save combined 4-panel report
                 plot_combined_report(
-                    pil_img, sm,
-                    ins_x, ins_y, ins_auc,
-                    del_x, del_y, del_auc,
+                    pil_img, sm, ins_x, ins_y, ins_auc, del_x, del_y, del_auc,
                     output_path=os.path.join(scorer_dir, f"layer_{layer_idx}_report.png"),
                     title=f"{stem} | {scorer_name} | layer {layer_idx}",
                     colormap=config.eval.heatmap_colormap,
@@ -282,10 +317,8 @@ def _evaluate_image(
                 )
 
         if save_outputs and all_score_maps_np:
-            # Save multi-layer heatmap grid
             plot_heatmaps_grid(
-                pil_img,
-                all_score_maps_np,
+                pil_img, all_score_maps_np,
                 output_path=os.path.join(scorer_dir, "all_layers_heatmaps.png"),
                 title=f"{stem} | {scorer_name} scorer",
                 colormap=config.eval.heatmap_colormap,
@@ -296,11 +329,9 @@ def _evaluate_image(
         image_metrics["scorers"][scorer_name] = layer_metrics
 
     if save_outputs:
-        # Save per-image metrics JSON
         metrics_path = os.path.join(out_root, stem, "metrics.json")
         os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
         with open(metrics_path, "w") as f:
-            # Exclude large curve arrays from JSON for compactness
             compact = {
                 "image_path": image_metrics["image_path"],
                 "y_hat": image_metrics["y_hat"],
@@ -446,6 +477,12 @@ def _parse_args() -> argparse.Namespace:
         help="Override eval.num_save_images: save PNGs/metrics.json for N randomly "
              "selected images; all images still contribute to aggregate stats.",
     )
+    p.add_argument(
+        "--perturbation-image-batch-size", type=int, default=None,
+        metavar="N",
+        help="Override eval.perturbation_image_batch_size: number of images batched "
+             "together for insertion/deletion inference.",
+    )
     return p.parse_args()
 
 
@@ -475,6 +512,8 @@ def main() -> None:
         config.eval.num_images = args.num_images
     if args.num_save_images is not None:
         config.eval.num_save_images = args.num_save_images
+    if args.perturbation_image_batch_size is not None:
+        config.eval.perturbation_image_batch_size = args.perturbation_image_batch_size
 
     # Seed
     random.seed(config.seed)
@@ -552,14 +591,16 @@ def main() -> None:
         f"{len(save_paths)}/{len(image_paths)} image(s)."
     )
 
-    # Determine which scorer names are active (for summary)
-    active_scorer_names: list[str] = []
+    # Build ordered list of active scorers (name + object) for batch helpers
+    active_scorers_list: list[tuple[str, object]] = []
     if cls_scorer is not None:
-        active_scorer_names.append("cls")
+        active_scorers_list.append(("cls", cls_scorer))
     if patch_scorer is not None:
-        active_scorer_names.append("patch")
+        active_scorers_list.append(("patch", patch_scorer))
     if patch_map_cls_scorer is not None:
-        active_scorer_names.append("patch_map_cls")
+        active_scorers_list.append(("patch_map_cls", patch_map_cls_scorer))
+
+    active_scorer_names: list[str] = [name for name, _ in active_scorers_list]
 
     all_image_metrics: list[dict] = []
     transform = wrapper.get_transform()
@@ -606,35 +647,49 @@ def main() -> None:
             sigma=config.eval.blur_sigma,
         )
 
+        n_imgs = len(valid_paths)
+        y_hats = [int(batch_logits[i].argmax().item()) for i in range(n_imgs)]
+
+        # Compute score maps for all images (fast: no model call)
+        batch_score_maps = _compute_batch_score_maps(
+            batch_patch_states, y_hats, active_scorers_list, n_imgs
+        )
+
+        # Batch insertion/deletion across images (the slow part)
+        try:
+            batch_curves = _run_batch_perturbations(
+                model=wrapper.model,
+                batch_tensor=batch_tensor,
+                batch_blurred=batch_blurred,
+                batch_score_maps=batch_score_maps,
+                y_hats=y_hats,
+                active_scorer_names=active_scorer_names,
+                target_layers=target_layers,
+                patch_size=patch_size,
+                device=device,
+                eval_batch_size=config.eval.perturbation_batch_size,
+                image_batch_size=config.eval.perturbation_image_batch_size,
+            )
+        except Exception as e:
+            print(f"  [batch perturbation error] {e}")
+            wrapper._register_hooks()
+            continue
+
+        # Per-image output saving and metrics collection
         for i, (image_path, pil_img) in enumerate(zip(valid_paths, pil_imgs)):
             processed += 1
             print(f"[{processed}/{n_total}] {image_path}")
-
-            # Slice this image's data out of the batch
-            image_tensor = batch_tensor[i: i + 1]                        # [1, C, H, W]
-            patch_states_i = {
-                l: batch_patch_states[l][i: i + 1]
-                for l in batch_patch_states
-            }
-            y_hat = int(batch_logits[i].argmax().item())
-            blurred_i = batch_blurred[i: i + 1]                          # [1, C, H, W]
 
             try:
                 metrics = _evaluate_image(
                     image_path=image_path,
                     pil_img=pil_img,
-                    image_tensor=image_tensor,
-                    patch_states=patch_states_i,
-                    y_hat=y_hat,
-                    blurred=blurred_i,
-                    cls_scorer=cls_scorer,
-                    patch_scorer=patch_scorer,
-                    patch_map_cls_scorer=patch_map_cls_scorer,
+                    y_hat=y_hats[i],
+                    score_maps_by_scorer=batch_score_maps[i],
+                    curves_by_scorer=batch_curves[i],
+                    active_scorer_names=active_scorer_names,
                     target_layers=target_layers,
                     config=config,
-                    patch_size=patch_size,
-                    device=device,
-                    model=wrapper.model,
                     save_outputs=image_path in save_paths,
                 )
                 all_image_metrics.append(metrics)
