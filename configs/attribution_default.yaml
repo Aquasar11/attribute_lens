@@ -28,4 +28,15 @@ eval:
   heatmap_alpha: 0.6
   plot_dpi: 150
 
+  layer_avg:
+    enabled: false
+    min_layer: null             # inclusive; null = first available layer
+    max_layer: null             # inclusive; null = last available layer
+    weights_path: ""            # empty = uniform; path to .pt from fg_bg_layer_weights.ipynb
+
+  neighbor_avg:
+    enabled: false
+    size: 3                     # N in N×N window; must be odd
+    mode: "score"               # "score" | "embedding" | "both"
+
 seed: 42

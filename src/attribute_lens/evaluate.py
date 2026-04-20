@@ -32,9 +32,15 @@ from tqdm import tqdm
 from tuned_lens.config import ModelConfig
 from tuned_lens.model import VisionModelWrapper
 
-from .config import AttributionConfig, EvalSection
+from .config import AttributionConfig, EvalSection, LayerAvgSection, NeighborAvgSection
 from .scorer import CLSLensScorer, PatchLensScorer, PatchMapCLSLensScorer, discover_lens_files
 from .metrics import apply_gaussian_blur, insertion_deletion_curves_all_layers
+from .postprocess import (
+    neighbor_avg_embeddings,
+    neighbor_avg_scores,
+    layer_avg_score_maps,
+    load_layer_weights,
+)
 from .visualize import (
     plot_heatmap,
     plot_heatmaps_grid,
@@ -155,6 +161,51 @@ def _infer_patch_size(wrapper: VisionModelWrapper) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Neighbor / layer-avg helpers
+# ---------------------------------------------------------------------------
+
+def _neighbor_scorer_names(base_names: list[str], mode: str) -> list[str]:
+    """Return the virtual scorer names produced by neighbor averaging."""
+    suffixes: dict[str, list[str]] = {
+        "embedding": ["_ne"],
+        "score":     ["_ns"],
+        "both":      ["_ne", "_ns", "_ne_ns"],
+    }
+    return [b + s for b in base_names for s in suffixes.get(mode, [])]
+
+
+def _compute_layer_avg_maps(
+    batch_score_maps: list[dict],
+    scorer_names_for_la: list[str],
+    layer_avg_cfg: LayerAvgSection,
+    layer_weights: dict[int, float],
+) -> None:
+    """Mutate batch_score_maps in-place, adding '{name}_la' entries.
+
+    The layer-averaged result is stored with the sentinel layer key ``-1``
+    so it flows through the existing perturbation/metrics/summary code
+    without modification.
+    """
+    weights = layer_weights if layer_weights else None
+    for score_maps_i in batch_score_maps:
+        for sname in scorer_names_for_la:
+            maps = score_maps_i.get(sname, {})
+            if not maps:
+                continue
+            try:
+                avg = layer_avg_score_maps(
+                    maps,
+                    min_layer=layer_avg_cfg.min_layer,
+                    max_layer=layer_avg_cfg.max_layer,
+                    weights=weights,
+                )
+            except ValueError as e:
+                print(f"  [layer_avg warning] {sname}: {e}")
+                continue
+            score_maps_i[sname + "_la"] = {-1: avg}
+
+
+# ---------------------------------------------------------------------------
 # Batch helpers: score map computation and perturbation curves
 # ---------------------------------------------------------------------------
 
@@ -163,17 +214,51 @@ def _compute_batch_score_maps(
     y_hats: list[int],
     active_scorers_list: list[tuple[str, object]],
     n_images: int,
+    neighbor_cfg: NeighborAvgSection | None = None,
 ) -> list[dict[str, dict[int, torch.Tensor]]]:
     """Compute score maps for all images in the extraction batch.
 
     Returns a list (length ``n_images``) of
     ``{scorer_name: {layer_idx: score_map [H_p, W_p]}}``.
+
+    When ``neighbor_cfg`` is provided and enabled, additional score maps are
+    computed for each active scorer:
+    - ``"{scorer_name}_ne"`` — scores from neighbor-embedding-averaged patch states
+    - ``"{scorer_name}_ns"`` — neighbor-score-averaged original scores
+    - ``"{scorer_name}_ne_ns"`` — neighbor score avg applied to ``_ne`` maps (mode="both")
     """
     result: list[dict] = [{} for _ in range(n_images)]
     for i in range(n_images):
         patch_states_i = {l: batch_patch_states[l][i: i + 1] for l in batch_patch_states}
         for scorer_name, scorer in active_scorers_list:
             result[i][scorer_name] = scorer.score_all_layers(patch_states_i, y_hats[i])  # type: ignore[attr-defined]
+
+        if neighbor_cfg is not None and neighbor_cfg.enabled:
+            mode = neighbor_cfg.mode
+            nb_size = neighbor_cfg.size
+
+            # Embedding-level neighbor averaging
+            if mode in ("embedding", "both"):
+                ne_states = neighbor_avg_embeddings(patch_states_i, size=nb_size)
+                for scorer_name, scorer in active_scorers_list:
+                    result[i][scorer_name + "_ne"] = scorer.score_all_layers(ne_states, y_hats[i])  # type: ignore[attr-defined]
+
+            # Score-level neighbor averaging on original maps
+            if mode in ("score", "both"):
+                for scorer_name, _ in active_scorers_list:
+                    result[i][scorer_name + "_ns"] = {
+                        l: neighbor_avg_scores(result[i][scorer_name][l], size=nb_size)
+                        for l in result[i][scorer_name]
+                    }
+
+            # Score-level neighbor averaging on embedding-averaged maps (both only)
+            if mode == "both":
+                for scorer_name, _ in active_scorers_list:
+                    result[i][scorer_name + "_ne_ns"] = {
+                        l: neighbor_avg_scores(result[i][scorer_name + "_ne"][l], size=nb_size)
+                        for l in result[i][scorer_name + "_ne"]
+                    }
+
     return result
 
 
@@ -266,9 +351,7 @@ def _evaluate_image(
         layer_metrics: dict[int, dict] = {}
         all_score_maps_np: dict[int, np.ndarray] = {}
 
-        for layer_idx in target_layers:
-            if layer_idx not in scorer_maps or layer_idx not in scorer_curves:
-                continue
+        for layer_idx in sorted(set(scorer_maps.keys()) & set(scorer_curves.keys())):
 
             sm = scorer_maps[layer_idx].cpu().numpy()
             ins_x, ins_y, ins_auc, del_x, del_y, del_auc = scorer_curves[layer_idx]
@@ -378,7 +461,11 @@ def _build_summary(
     # Per-scorer, per-layer aggregate stats
     for scorer_name in scorer_names:
         summary["aggregate"][scorer_name] = {}
-        for layer_idx in target_layers:
+        # Collect all layer keys that appear for this scorer across images
+        all_layer_ids_for_scorer: set[int] = set()
+        for m in all_image_metrics:
+            all_layer_ids_for_scorer |= set(m["scorers"].get(scorer_name, {}).keys())
+        for layer_idx in sorted(all_layer_ids_for_scorer):
             ins_aucs, del_aucs = [], []
             for m in all_image_metrics:
                 layer_data = m["scorers"].get(scorer_name, {}).get(layer_idx)
@@ -403,7 +490,10 @@ def _build_summary(
 
     # Aggregate curve plots (one per scorer × layer)
     for scorer_name in scorer_names:
-        for layer_idx in target_layers:
+        all_layer_ids_for_scorer = set()
+        for m in all_image_metrics:
+            all_layer_ids_for_scorer |= set(m["scorers"].get(scorer_name, {}).keys())
+        for layer_idx in sorted(all_layer_ids_for_scorer):
             ins_ys, del_ys = [], []
             ref_ins_x = ref_del_x = None
             for m in all_image_metrics:
@@ -599,6 +689,31 @@ def main() -> None:
 
     active_scorer_names: list[str] = [name for name, _ in active_scorers_list]
 
+    # --- Post-processing config ---
+    neighbor_cfg = config.eval.neighbor_avg
+    layer_avg_cfg = config.eval.layer_avg
+
+    layer_weights: dict[int, float] = {}
+    if layer_avg_cfg.enabled and layer_avg_cfg.weights_path:
+        layer_weights = load_layer_weights(layer_avg_cfg.weights_path)
+        print(f"Loaded layer weights from {layer_avg_cfg.weights_path}: {layer_weights}")
+
+    ne_names: list[str] = (
+        _neighbor_scorer_names(active_scorer_names, neighbor_cfg.mode)
+        if neighbor_cfg.enabled else []
+    )
+    # layer_avg applies to both base scorers and their neighbor-avg variants
+    la_base_names: list[str] = active_scorer_names + ne_names
+    la_names: list[str] = (
+        [n + "_la" for n in la_base_names] if layer_avg_cfg.enabled else []
+    )
+    all_scorer_names: list[str] = active_scorer_names + ne_names + la_names
+
+    if ne_names:
+        print(f"Neighbor-avg scorer variants: {ne_names}")
+    if la_names:
+        print(f"Layer-avg scorer variants: {la_names}")
+
     all_image_metrics: list[dict] = []
     transform = wrapper.get_transform()
     extr_bs = config.eval.extraction_batch_size
@@ -650,8 +765,13 @@ def main() -> None:
 
         # Compute score maps for all images (fast: no model call)
         batch_score_maps = _compute_batch_score_maps(
-            batch_patch_states, y_hats, active_scorers_list, n_imgs
+            batch_patch_states, y_hats, active_scorers_list, n_imgs,
+            neighbor_cfg=neighbor_cfg if neighbor_cfg.enabled else None,
         )
+
+        # Layer-average post-processing (mutates batch_score_maps in-place)
+        if layer_avg_cfg.enabled:
+            _compute_layer_avg_maps(batch_score_maps, la_base_names, layer_avg_cfg, layer_weights)
 
         # Batch insertion/deletion across images (the slow part)
         try:
@@ -661,7 +781,7 @@ def main() -> None:
                 batch_blurred=batch_blurred,
                 batch_score_maps=batch_score_maps,
                 y_hats=y_hats,
-                active_scorer_names=active_scorer_names,
+                active_scorer_names=all_scorer_names,
                 patch_size=patch_size,
                 device=device,
                 eval_batch_size=config.eval.perturbation_batch_size,
@@ -684,7 +804,7 @@ def main() -> None:
                     y_hat=y_hats[i],
                     score_maps_by_scorer=batch_score_maps[i],
                     curves_by_scorer=batch_curves[i],
-                    active_scorer_names=active_scorer_names,
+                    active_scorer_names=all_scorer_names,
                     target_layers=target_layers,
                     config=config,
                     save_outputs=image_path in save_paths,
@@ -714,7 +834,7 @@ def main() -> None:
     _build_summary(
         all_image_metrics=all_image_metrics,
         target_layers=target_layers,
-        scorer_names=active_scorer_names,
+        scorer_names=all_scorer_names,
         output_dir=config.eval.output_dir,
         plot_dpi=config.eval.plot_dpi,
     )

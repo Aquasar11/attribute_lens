@@ -68,6 +68,23 @@ class LensSection:
 
 
 @dataclass
+class LayerAvgSection:
+    """Layer-wise averaged scoring settings."""
+    enabled: bool = False
+    min_layer: int | None = None   # inclusive; None = first available target layer
+    max_layer: int | None = None   # inclusive; None = last available target layer
+    weights_path: str = ""         # empty = uniform; path to .pt from fg_bg_layer_weights notebook
+
+
+@dataclass
+class NeighborAvgSection:
+    """Neighbor-averaging settings for patches."""
+    enabled: bool = False
+    size: int = 3                  # N in N×N square of neighbors; must be odd
+    mode: str = "score"            # "score" | "embedding" | "both"
+
+
+@dataclass
 class EvalSection:
     """Evaluation settings."""
     # Image sources — image_paths takes precedence over image_dir
@@ -100,6 +117,10 @@ class EvalSection:
     heatmap_colormap: str = "hot"
     heatmap_alpha: float = 0.6
     plot_dpi: int = 150
+
+    # Optional post-processing modes
+    layer_avg: LayerAvgSection = field(default_factory=LayerAvgSection)
+    neighbor_avg: NeighborAvgSection = field(default_factory=NeighborAvgSection)
 
 
 @dataclass
