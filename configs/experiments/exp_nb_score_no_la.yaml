@@ -1,0 +1,42 @@
+model:
+  model_name: "vit_large_patch14_clip_224.openai_ft_in1k"
+  weights_path: null
+  target_layers: null
+
+lens:
+  cls_lens_dir: "/home/dev/attribute_lens/outputs/affine_kld/best_lenses"
+  patch_lens_dir: ""
+  patch_map_dir: "/home/dev/attribute_lens/outputs/patch_map_full/best_maps"
+  patch_neighbor_size: 3
+  patch_border: 2
+  means_path: ""
+
+eval:
+  image_dir: "/home/dev/attribute_lens/outputs/first100/imagenet_2012_val"
+  image_paths: []
+  num_images: null
+  num_save_images: null
+  output_dir: "/home/dev/attribute_lens/outputs/experiments/nb_score_no_la"
+  device: "cuda"
+  scorer_type: "patch_map_cls"
+  blur_kernel_size: 55
+  blur_sigma: 10.0
+  perturbation_batch_size: 2048
+  extraction_batch_size: 64
+  use_fp16: true
+  heatmap_colormap: "hot"
+  heatmap_alpha: 0.6
+  plot_dpi: 150
+
+  layer_avg:
+    enabled: false
+    min_layer: null
+    max_layer: null
+    weights_path: ""
+
+  neighbor_avg:
+    enabled: true
+    size: 3
+    mode: "score"
+
+seed: 42
