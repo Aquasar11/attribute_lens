@@ -125,12 +125,19 @@ def _run_batched_forward(
     y_hat: int,
     batch_size: int,
     use_fp16: bool = False,
+    device: str | None = None,
 ) -> list[float]:
-    """Run *model* on *imgs* in chunks of *batch_size*, return P(y_hat) list."""
+    """Run *model* on *imgs* in chunks of *batch_size*, return P(y_hat) list.
+
+    If *device* is provided each chunk is moved there before the forward pass,
+    allowing *imgs* to live on CPU to avoid pre-allocating large GPU buffers.
+    """
     probs: list[float] = []
-    device_type = imgs.device.type
+    device_type = device.split(":")[0] if device else imgs.device.type
     for i in range(0, len(imgs), batch_size):
         chunk = imgs[i: i + batch_size]
+        if device:
+            chunk = chunk.to(device)
         with torch.autocast(device_type=device_type, dtype=torch.float16, enabled=use_fp16):
             logits = model(chunk)
         probs.extend(F.softmax(logits.float(), dim=-1)[:, y_hat].cpu().tolist())

@@ -342,29 +342,36 @@ def _run_batch_perturbations(
         # Track slice boundaries to reconstruct per-variant results
         slices: list[tuple[str, list[int], int, int]] = []  # (name, layers, n_patches, start)
 
+        # Build perturbed tensors on CPU to avoid allocating gigabytes of
+        # GPU memory upfront (24 layers × 256 patches × [3,224,224] ≈ 1.8 GB).
+        # _run_batched_forward moves each chunk to the GPU device on the fly.
+        original_cpu = original.cpu()
+        blurred_cpu  = blurred.cpu()
+
         offset = 0
         for scorer_name, layers, n_patches, rank_orders in active_variants:
             L = len(layers)
-            ins_v = torch.empty(L * n_patches, C, H, W, device=device)
-            del_v = torch.empty(L * n_patches, C, H, W, device=device)
+            ins_v = torch.empty(L * n_patches, C, H, W)   # CPU
+            del_v = torch.empty(L * n_patches, C, H, W)   # CPU
             for k, l in enumerate(layers):
                 ins_v[k * n_patches: (k + 1) * n_patches] = _build_perturbed_images(
-                    blurred, original, rank_orders[l], W_p, patch_size, device)
+                    blurred_cpu, original_cpu, rank_orders[l], W_p, patch_size, "cpu")
                 del_v[k * n_patches: (k + 1) * n_patches] = _build_perturbed_images(
-                    original, blurred, rank_orders[l], W_p, patch_size, device)
+                    original_cpu, blurred_cpu, rank_orders[l], W_p, patch_size, "cpu")
             ins_parts.append(ins_v)
             del_parts.append(del_v)
             slices.append((scorer_name, layers, n_patches, offset))
             offset += L * n_patches
 
-        all_ins = torch.cat(ins_parts, dim=0)  # [total_perturbed, C, H, W]
+        all_ins = torch.cat(ins_parts, dim=0)  # [total_perturbed, C, H, W] — CPU
         all_del = torch.cat(del_parts, dim=0)
-        del ins_parts, del_parts
+        del ins_parts, del_parts, original_cpu, blurred_cpu
 
-        # Two forward passes — all variants, all layers, one image
-        ins_probs = _run_batched_forward(model, all_ins, y_hat, eval_batch_size, use_fp16)
+        # Two forward passes — all variants, all layers, one image.
+        # Chunks are moved to `device` inside _run_batched_forward.
+        ins_probs = _run_batched_forward(model, all_ins, y_hat, eval_batch_size, use_fp16, device)
         del all_ins
-        del_probs = _run_batched_forward(model, all_del, y_hat, eval_batch_size, use_fp16)
+        del_probs = _run_batched_forward(model, all_del, y_hat, eval_batch_size, use_fp16, device)
         del all_del
 
         # Split results back to per-scorer-variant, per-layer curves
