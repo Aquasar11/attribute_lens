@@ -9,8 +9,9 @@ the model's decision:
   confidence.
 
 - **Deletion** (lower AUC = better): start from the original image and
-  progressively mask patches with the blurred baseline, ordered by descending
-  importance score.  A good ranking causes a rapid drop in confidence.
+  progressively mask patches with zeros (normalized mean-color fill), ordered
+  by descending importance score.  A good ranking causes a rapid drop in
+  confidence.
 """
 
 from __future__ import annotations
@@ -214,7 +215,7 @@ def deletion_curve(
     n_patches = H_p * W_p
     rank_order = _rank_patches(score_map)
 
-    imgs = _build_perturbed_images(original, blurred, rank_order, W_p, patch_size, device)
+    imgs = _build_perturbed_images(original, torch.zeros_like(original), rank_order, W_p, patch_size, device)
     probs = _run_batched_forward(model, imgs, y_hat, eval_batch_size)
     del imgs
 
@@ -248,7 +249,7 @@ def insertion_deletion_curves(
     ins_probs = _run_batched_forward(model, ins_imgs, y_hat, eval_batch_size)
     del ins_imgs
 
-    del_imgs = _build_perturbed_images(original, blurred, rank_order, W_p, patch_size, device)
+    del_imgs = _build_perturbed_images(original, torch.zeros_like(original), rank_order, W_p, patch_size, device)
     del_probs = _run_batched_forward(model, del_imgs, y_hat, eval_batch_size)
     del del_imgs
 
@@ -315,11 +316,12 @@ def insertion_deletion_curves_all_layers(
     ins_probs = _run_batched_forward(model, all_ins, y_hat, eval_batch_size, use_fp16)
     del all_ins
 
-    # ---- Pass 2: deletion (original → blurred) ----
+    # ---- Pass 2: deletion (original → zeros) ----
+    del_fill = torch.zeros_like(original)
     all_del = torch.empty(L * n_patches, C, H, W, device=device)
     for k, l in enumerate(layers):
         all_del[k * n_patches: (k + 1) * n_patches] = _build_perturbed_images(
-            original, blurred, rank_orders[l], W_p, patch_size, device
+            original, del_fill, rank_orders[l], W_p, patch_size, device
         )
     del_probs = _run_batched_forward(model, all_del, y_hat, eval_batch_size, use_fp16)
     del all_del
@@ -382,7 +384,7 @@ def insertion_deletion_curves_batch(
     all_del = torch.empty(N * n_patches, C, H, W, device=device)
     for i in range(N):
         all_del[i * n_patches: (i + 1) * n_patches] = _build_perturbed_images(
-            originals[i: i + 1], blurreds[i: i + 1], rank_orders[i], W_p, patch_size, device
+            originals[i: i + 1], torch.zeros_like(originals[i: i + 1]), rank_orders[i], W_p, patch_size, device
         )
 
     y_hats_t2 = torch.tensor(

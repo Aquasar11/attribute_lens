@@ -348,6 +348,7 @@ def _run_batch_perturbations(
         # _run_batched_forward moves each chunk to the GPU device on the fly.
         original_cpu = original.cpu()
         blurred_cpu  = blurred.cpu()
+        zeros_cpu    = torch.zeros_like(original_cpu)
 
         offset = 0
         for scorer_name, layers, n_patches, rank_orders in active_variants:
@@ -358,7 +359,7 @@ def _run_batch_perturbations(
                 ins_v[k * n_patches: (k + 1) * n_patches] = _build_perturbed_images(
                     blurred_cpu, original_cpu, rank_orders[l], W_p, patch_size, "cpu")
                 del_v[k * n_patches: (k + 1) * n_patches] = _build_perturbed_images(
-                    original_cpu, blurred_cpu, rank_orders[l], W_p, patch_size, "cpu")
+                    original_cpu, zeros_cpu, rank_orders[l], W_p, patch_size, "cpu")
             ins_parts.append(ins_v)
             del_parts.append(del_v)
             slices.append((scorer_name, layers, n_patches, offset))
