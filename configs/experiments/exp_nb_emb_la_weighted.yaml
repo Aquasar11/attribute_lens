@@ -21,7 +21,7 @@ eval:
   scorer_type: "patch_map_cls"
   blur_kernel_size: 55
   blur_sigma: 10.0
-  perturbation_batch_size: 2048
+  perturbation_batch_size: 1024
   extraction_batch_size: 64
   use_fp16: true
   heatmap_colormap: "hot"
