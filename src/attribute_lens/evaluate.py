@@ -25,6 +25,7 @@ from glob import glob
 from pathlib import Path
 
 import numpy as np
+import timm
 import torch
 from PIL import Image
 from tqdm import tqdm
@@ -788,7 +789,9 @@ def main() -> None:
     la_names: list[str] = (
         [n + "_la" for n in la_base_names] if layer_avg_cfg.enabled else []
     )
-    all_scorer_names: list[str] = active_scorer_names + ne_names + la_names
+    # When layer_avg is enabled, only evaluate the aggregated _la variants
+    # (single AUC per scorer). Skip per-layer base/ne evaluations.
+    all_scorer_names: list[str] = la_names if layer_avg_cfg.enabled else (active_scorer_names + ne_names)
 
     if ne_names:
         print(f"Neighbor-avg scorer variants: {ne_names}")
@@ -797,6 +800,17 @@ def main() -> None:
 
     all_image_metrics: list[dict] = []
     transform = wrapper.get_transform()
+
+    # Build a denormalizer so we can display the exact 224×224 tensor the model sees.
+    _data_cfg = timm.data.resolve_model_data_config(wrapper.model)
+    _mean = torch.tensor(_data_cfg["mean"]).view(3, 1, 1)
+    _std  = torch.tensor(_data_cfg["std"]).view(3, 1, 1)
+
+    def _tensor_to_display_pil(t: torch.Tensor) -> Image.Image:
+        """Denormalize a model-input tensor [3,H,W] → PIL RGB image."""
+        img = (t.cpu() * _std + _mean).clamp(0.0, 1.0)
+        return Image.fromarray((img.permute(1, 2, 0).numpy() * 255).astype("uint8"))
+
     extr_bs = config.eval.extraction_batch_size
     n_total = len(image_paths)
 
@@ -815,7 +829,8 @@ def main() -> None:
             try:
                 pil = Image.open(path).convert("RGB")
                 t = transform(pil).to(device)
-                pil_imgs.append(pil)
+                # Use the 224×224 model-input image (denormalized) for all plots.
+                pil_imgs.append(_tensor_to_display_pil(t))
                 tensors.append(t)
                 valid_paths.append(path)
             except Exception as e:
