@@ -789,9 +789,18 @@ def main() -> None:
     la_names: list[str] = (
         [n + "_la" for n in la_base_names] if layer_avg_cfg.enabled else []
     )
-    # When layer_avg is enabled, only evaluate the aggregated _la variants
-    # (single AUC per scorer). Skip per-layer base/ne evaluations.
-    all_scorer_names: list[str] = la_names if layer_avg_cfg.enabled else (active_scorer_names + ne_names)
+    # Determine the single final set of scorer variants to evaluate for perturbation.
+    # Each config tests ONE pipeline; intermediate results (base scores before
+    # neighbor/layer averaging) are never evaluated separately.
+    if neighbor_cfg.enabled:
+        # Neighbor averaging is the final step; layer_avg may additionally combine layers.
+        all_scorer_names = [n + "_la" for n in ne_names] if layer_avg_cfg.enabled else ne_names
+    elif layer_avg_cfg.enabled:
+        # Layer avg only (no neighbor): single aggregated map per base scorer.
+        all_scorer_names = la_names
+    else:
+        # Base scorer only.
+        all_scorer_names = active_scorer_names
 
     if ne_names:
         print(f"Neighbor-avg scorer variants: {ne_names}")
