@@ -34,7 +34,14 @@ from tuned_lens.model import VisionModelWrapper
 
 from .config import AttributionConfig, EvalSection, LayerAvgSection, NeighborAvgSection
 from .scorer import CLSLensScorer, PatchLensScorer, PatchMapCLSLensScorer, discover_lens_files
-from .metrics import apply_gaussian_blur, insertion_deletion_curves_all_layers
+from sklearn.metrics import auc as sklearn_auc
+from .metrics import (
+    apply_gaussian_blur,
+    insertion_deletion_curves_all_layers,
+    _rank_patches,
+    _build_perturbed_images,
+    _run_batched_forward,
+)
 from .postprocess import (
     neighbor_avg_embeddings,
     neighbor_avg_scores,
@@ -218,46 +225,62 @@ def _compute_batch_score_maps(
 ) -> list[dict[str, dict[int, torch.Tensor]]]:
     """Compute score maps for all images in the extraction batch.
 
+    All B images are scored in a single batched call per layer (patch_map +
+    lens applied to [B*H*W, d] in one shot).  Neighbor averaging over
+    embeddings is also batched across all B images via conv2d.
+
     Returns a list (length ``n_images``) of
     ``{scorer_name: {layer_idx: score_map [H_p, W_p]}}``.
-
-    When ``neighbor_cfg`` is provided and enabled, additional score maps are
-    computed for each active scorer:
-    - ``"{scorer_name}_ne"`` — scores from neighbor-embedding-averaged patch states
-    - ``"{scorer_name}_ns"`` — neighbor-score-averaged original scores
-    - ``"{scorer_name}_ne_ns"`` — neighbor score avg applied to ``_ne`` maps (mode="both")
     """
     result: list[dict] = [{} for _ in range(n_images)]
-    for i in range(n_images):
-        patch_states_i = {l: batch_patch_states[l][i: i + 1] for l in batch_patch_states}
+
+    # --- Base scoring: all B images in one call per layer ---
+    for scorer_name, scorer in active_scorers_list:
+        if hasattr(scorer, "score_all_layers_batch"):
+            per_image = scorer.score_all_layers_batch(batch_patch_states, y_hats)  # type: ignore[attr-defined]
+            for i in range(n_images):
+                result[i][scorer_name] = per_image[i]
+        else:
+            # Fallback for scorers without batch support
+            for i in range(n_images):
+                patch_states_i = {l: batch_patch_states[l][i: i + 1] for l in batch_patch_states}
+                result[i][scorer_name] = scorer.score_all_layers(patch_states_i, y_hats[i])  # type: ignore[attr-defined]
+
+    if neighbor_cfg is None or not neighbor_cfg.enabled:
+        return result
+
+    mode = neighbor_cfg.mode
+    nb_size = neighbor_cfg.size
+
+    # --- Embedding-level neighbor averaging: batch conv2d over all B images ---
+    if mode in ("embedding", "both"):
+        ne_states = neighbor_avg_embeddings(batch_patch_states, size=nb_size)
         for scorer_name, scorer in active_scorers_list:
-            result[i][scorer_name] = scorer.score_all_layers(patch_states_i, y_hats[i])  # type: ignore[attr-defined]
+            if hasattr(scorer, "score_all_layers_batch"):
+                per_image_ne = scorer.score_all_layers_batch(ne_states, y_hats)  # type: ignore[attr-defined]
+                for i in range(n_images):
+                    result[i][scorer_name + "_ne"] = per_image_ne[i]
+            else:
+                for i in range(n_images):
+                    ne_states_i = {l: ne_states[l][i: i + 1] for l in ne_states}
+                    result[i][scorer_name + "_ne"] = scorer.score_all_layers(ne_states_i, y_hats[i])  # type: ignore[attr-defined]
 
-        if neighbor_cfg is not None and neighbor_cfg.enabled:
-            mode = neighbor_cfg.mode
-            nb_size = neighbor_cfg.size
+    # --- Score-level neighbor averaging (per-image; conv2d is cheap) ---
+    if mode in ("score", "both"):
+        for scorer_name, _ in active_scorers_list:
+            for i in range(n_images):
+                result[i][scorer_name + "_ns"] = {
+                    l: neighbor_avg_scores(result[i][scorer_name][l], size=nb_size)
+                    for l in result[i][scorer_name]
+                }
 
-            # Embedding-level neighbor averaging
-            if mode in ("embedding", "both"):
-                ne_states = neighbor_avg_embeddings(patch_states_i, size=nb_size)
-                for scorer_name, scorer in active_scorers_list:
-                    result[i][scorer_name + "_ne"] = scorer.score_all_layers(ne_states, y_hats[i])  # type: ignore[attr-defined]
-
-            # Score-level neighbor averaging on original maps
-            if mode in ("score", "both"):
-                for scorer_name, _ in active_scorers_list:
-                    result[i][scorer_name + "_ns"] = {
-                        l: neighbor_avg_scores(result[i][scorer_name][l], size=nb_size)
-                        for l in result[i][scorer_name]
-                    }
-
-            # Score-level neighbor averaging on embedding-averaged maps (both only)
-            if mode == "both":
-                for scorer_name, _ in active_scorers_list:
-                    result[i][scorer_name + "_ne_ns"] = {
-                        l: neighbor_avg_scores(result[i][scorer_name + "_ne"][l], size=nb_size)
-                        for l in result[i][scorer_name + "_ne"]
-                    }
+    if mode == "both":
+        for scorer_name, _ in active_scorers_list:
+            for i in range(n_images):
+                result[i][scorer_name + "_ne_ns"] = {
+                    l: neighbor_avg_scores(result[i][scorer_name + "_ne"][l], size=nb_size)
+                    for l in result[i][scorer_name + "_ne"]
+                }
 
     return result
 
@@ -276,35 +299,86 @@ def _run_batch_perturbations(
 ) -> list[dict[str, dict[int, tuple]]]:
     """Run insertion+deletion curves for all images.
 
-    For each image, ALL layers are processed together in two forward passes
-    (one for all insertion states, one for all deletion states), via
-    ``insertion_deletion_curves_all_layers``.
+    For each image, ALL scorer variants and ALL their layers are concatenated
+    into a single insertion tensor and a single deletion tensor, then processed
+    in exactly 2 forward passes (chunked by ``eval_batch_size``).  This
+    eliminates the per-variant forward-pass loop.
 
     Returns a list (length N) of
     ``{scorer_name: {layer_idx: (ins_x, ins_y, ins_auc, del_x, del_y, del_auc)}}``.
     """
     N = len(y_hats)
+    C, H, W = batch_tensor.shape[1], batch_tensor.shape[2], batch_tensor.shape[3]
     results: list[dict] = [{sn: {} for sn in active_scorer_names} for _ in range(N)]
 
     pbar = tqdm(range(N), desc="ins+del", unit="img", leave=True)
     for i in pbar:
-        for scorer_name in active_scorer_names:
-            score_maps_for_scorer = batch_score_maps[i].get(scorer_name, {})
-            if not score_maps_for_scorer:
-                continue
+        original = batch_tensor[i: i + 1]   # [1, C, H, W]
+        blurred  = batch_blurred[i: i + 1]  # [1, C, H, W]
+        y_hat    = y_hats[i]
 
-            layer_curves = insertion_deletion_curves_all_layers(
-                model=model,
-                original=batch_tensor[i: i + 1],
-                blurred=batch_blurred[i: i + 1],
-                score_maps_by_layer=score_maps_for_scorer,
-                y_hat=y_hats[i],
-                patch_size=patch_size,
-                device=device,
-                eval_batch_size=eval_batch_size,
-                use_fp16=use_fp16,
-            )
-            results[i][scorer_name] = layer_curves
+        # Collect active scorer variants and pre-compute rank orders
+        # active_variants: [(scorer_name, layers, n_patches, rank_orders)]
+        active_variants = []
+        for scorer_name in active_scorer_names:
+            score_maps = batch_score_maps[i].get(scorer_name, {})
+            if not score_maps:
+                continue
+            layers = sorted(score_maps.keys())
+            n_patches = next(iter(score_maps.values())).numel()
+            rank_orders = {l: _rank_patches(score_maps[l]) for l in layers}
+            active_variants.append((scorer_name, layers, n_patches, rank_orders))
+
+        if not active_variants:
+            continue
+
+        # Infer grid width from the first score map shape
+        first_sm = next(iter(batch_score_maps[i][active_variants[0][0]].values()))
+        H_p, W_p = first_sm.shape
+
+        # Build one insertion tensor and one deletion tensor covering ALL variants
+        ins_parts: list[torch.Tensor] = []
+        del_parts: list[torch.Tensor] = []
+        # Track slice boundaries to reconstruct per-variant results
+        slices: list[tuple[str, list[int], int, int]] = []  # (name, layers, n_patches, start)
+
+        offset = 0
+        for scorer_name, layers, n_patches, rank_orders in active_variants:
+            L = len(layers)
+            ins_v = torch.empty(L * n_patches, C, H, W, device=device)
+            del_v = torch.empty(L * n_patches, C, H, W, device=device)
+            for k, l in enumerate(layers):
+                ins_v[k * n_patches: (k + 1) * n_patches] = _build_perturbed_images(
+                    blurred, original, rank_orders[l], W_p, patch_size, device)
+                del_v[k * n_patches: (k + 1) * n_patches] = _build_perturbed_images(
+                    original, blurred, rank_orders[l], W_p, patch_size, device)
+            ins_parts.append(ins_v)
+            del_parts.append(del_v)
+            slices.append((scorer_name, layers, n_patches, offset))
+            offset += L * n_patches
+
+        all_ins = torch.cat(ins_parts, dim=0)  # [total_perturbed, C, H, W]
+        all_del = torch.cat(del_parts, dim=0)
+        del ins_parts, del_parts
+
+        # Two forward passes — all variants, all layers, one image
+        ins_probs = _run_batched_forward(model, all_ins, y_hat, eval_batch_size, use_fp16)
+        del all_ins
+        del_probs = _run_batched_forward(model, all_del, y_hat, eval_batch_size, use_fp16)
+        del all_del
+
+        # Split results back to per-scorer-variant, per-layer curves
+        x_axis = np.linspace(1.0 / active_variants[0][2], 1.0, active_variants[0][2])
+        for scorer_name, layers, n_patches, start in slices:
+            x = np.linspace(1.0 / n_patches, 1.0, n_patches)
+            for k, l in enumerate(layers):
+                sl = slice(start + k * n_patches, start + (k + 1) * n_patches)
+                i_y = np.array(ins_probs[sl])
+                d_y = np.array(del_probs[sl])
+                results[i][scorer_name][l] = (
+                    x, i_y, float(sklearn_auc(x, i_y)),
+                    x, d_y, float(sklearn_auc(x, d_y)),
+                )
 
     return results
 

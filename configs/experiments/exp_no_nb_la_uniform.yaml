@@ -15,7 +15,7 @@ eval:
   image_dir: "/home/dev/attribute_lens/outputs/first100/imagenet_2012_val"
   image_paths: []
   num_images: null
-  num_save_images: null
+  num_save_images: 10
   output_dir: "/home/dev/attribute_lens/outputs/experiments/no_nb_la_uniform"
   device: "cuda"
   scorer_type: "patch_map_cls"
@@ -30,8 +30,8 @@ eval:
 
   layer_avg:
     enabled: true
-    min_layer: null
-    max_layer: null
+    min_layer: 12
+    max_layer: 22
     weights_path: ""   # empty = uniform weights
 
   neighbor_avg:

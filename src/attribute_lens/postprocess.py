@@ -49,8 +49,8 @@ def neighbor_avg_embeddings(
     result: dict[int, torch.Tensor] = {}
 
     for layer, states in patch_states.items():
-        # states: [1, H, W, d]
-        _, H, W, d = states.shape
+        # states: [B, H, W, d]  (B=1 for single-image, B>1 for batched)
+        B, H, W, d = states.shape
         device = states.device
         dtype = states.dtype
 
@@ -61,14 +61,13 @@ def neighbor_avg_embeddings(
         # Expand to [d, 1, size, size] for groups=d convolution
         kernel_4d = kernel.unsqueeze(0).unsqueeze(0).expand(d, 1, size, size)
 
-        # Reshape: [1, H, W, d] → [1, d, H, W]  (batch=1, channels=d)
-        x = states[0].permute(2, 0, 1).unsqueeze(0)  # [1, d, H, W]
+        # Reshape: [B, H, W, d] → [B, d, H, W]
+        x = states.permute(0, 3, 1, 2)                            # [B, d, H, W]
 
-        smoothed = F.conv2d(x, kernel_4d, padding=pad, groups=d)  # [1, d, H, W]
+        smoothed = F.conv2d(x, kernel_4d, padding=pad, groups=d)  # [B, d, H, W]
 
-        # Reshape back: [1, d, H, W] → [1, H, W, d]
-        out = smoothed.squeeze(0).permute(1, 2, 0).unsqueeze(0)   # [1, H, W, d]
-        result[layer] = out
+        # Reshape back: [B, d, H, W] → [B, H, W, d]
+        result[layer] = smoothed.permute(0, 2, 3, 1)              # [B, H, W, d]
 
     return result
 

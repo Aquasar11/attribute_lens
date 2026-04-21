@@ -193,6 +193,48 @@ class CLSLensScorer:
             results[idx] = scores.reshape(H, W).cpu()
         return results
 
+    @torch.no_grad()
+    def score_all_layers_batch(
+        self,
+        batch_patch_states: dict[int, torch.Tensor],
+        y_hats: list[int],
+    ) -> list[dict[int, torch.Tensor]]:
+        """Batch version: processes all B images through each layer in one call.
+
+        Args:
+            batch_patch_states: ``{layer_idx: Tensor[B, H, W, d_model]}``.
+            y_hats: Predicted class indices, one per image.
+
+        Returns:
+            List of B dicts ``{layer_idx: Tensor[H, W]}``.
+        """
+        B = len(y_hats)
+        y_hats_t = torch.tensor(y_hats, dtype=torch.long, device=self.device)
+        results: list[dict[int, torch.Tensor]] = [{} for _ in range(B)]
+
+        for idx in self.target_layers:
+            patches = batch_patch_states[idx].to(self.device)  # [B, H, W, d]
+            _, H, W, d = patches.shape
+            flat = patches.reshape(B * H * W, d)               # [B*H*W, d]
+
+            mean_tok = self.token_means[idx]                    # [H*W, d]
+            mean_cls = self.cls_means[idx]                      # [d]
+            mean_tok_b = mean_tok.unsqueeze(0).expand(B, -1, -1).reshape(B * H * W, d)
+            mean_cls_b = mean_cls.unsqueeze(0).expand(B * H * W, d)
+
+            adjusted = flat - mean_tok_b + mean_cls_b          # [B*H*W, d]
+            logits = self.lenses[idx](adjusted)                 # [B*H*W, num_classes]
+            probs = F.softmax(logits, dim=-1)                   # [B*H*W, num_classes]
+
+            y_exp = y_hats_t.repeat_interleave(H * W)          # [B*H*W]
+            scores = probs[torch.arange(B * H * W, device=self.device), y_exp]
+            score_maps = scores.reshape(B, H, W).cpu()         # [B, H, W]
+
+            for i in range(B):
+                results[i][idx] = score_maps[i]
+
+        return results
+
 
 # ---------------------------------------------------------------------------
 # Patch Lens Scorer
@@ -419,4 +461,41 @@ class PatchMapCLSLensScorer:
             logits = self.lenses[idx](mapped)              # [H*W, num_classes]
             scores = F.softmax(logits, dim=-1)[:, y_hat]  # [H*W]
             results[idx] = scores.reshape(H, W).cpu()
+        return results
+
+    @torch.no_grad()
+    def score_all_layers_batch(
+        self,
+        batch_patch_states: dict[int, torch.Tensor],
+        y_hats: list[int],
+    ) -> list[dict[int, torch.Tensor]]:
+        """Batch version: processes all B images through each layer in one call.
+
+        Args:
+            batch_patch_states: ``{layer_idx: Tensor[B, H, W, d_model]}``.
+            y_hats: Predicted class indices, one per image.
+
+        Returns:
+            List of B dicts ``{layer_idx: Tensor[H, W]}``.
+        """
+        B = len(y_hats)
+        y_hats_t = torch.tensor(y_hats, dtype=torch.long, device=self.device)
+        results: list[dict[int, torch.Tensor]] = [{} for _ in range(B)]
+
+        for idx in self.target_layers:
+            patches = batch_patch_states[idx].to(self.device)  # [B, H, W, d]
+            _, H, W, d = patches.shape
+            flat = patches.reshape(B * H * W, d)               # [B*H*W, d]
+
+            mapped = self.patch_maps[idx](flat)                 # [B*H*W, d]
+            logits = self.lenses[idx](mapped)                   # [B*H*W, num_classes]
+            probs = F.softmax(logits, dim=-1)                   # [B*H*W, num_classes]
+
+            y_exp = y_hats_t.repeat_interleave(H * W)          # [B*H*W]
+            scores = probs[torch.arange(B * H * W, device=self.device), y_exp]
+            score_maps = scores.reshape(B, H, W).cpu()         # [B, H, W]
+
+            for i in range(B):
+                results[i][idx] = score_maps[i]
+
         return results

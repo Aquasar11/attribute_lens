@@ -15,7 +15,7 @@ eval:
   image_dir: "/home/dev/attribute_lens/outputs/first100/imagenet_2012_val"
   image_paths: []
   num_images: null
-  num_save_images: null
+  num_save_images: 10
   output_dir: "/home/dev/attribute_lens/outputs/experiments/no_nb_no_la"
   device: "cuda"
   scorer_type: "patch_map_cls"
