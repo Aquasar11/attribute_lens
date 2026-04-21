@@ -34,8 +34,8 @@ mkdir -p /home/dev/attribute_lens/tmp
 jupyter nbconvert \
     --to notebook \
     --execute \
+    --inplace \
     --ExecutePreprocessor.timeout=7200 \
-    --output "${NOTEBOOK}" \
     "$NOTEBOOK"
 
 if [[ ! -f "$WEIGHTS_PT" ]]; then
