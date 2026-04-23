@@ -1,0 +1,54 @@
+model:
+  model_name: "deit3_large_patch16_224.fb_in1k"
+  pretrained: true
+  weights_path: null        # Optional: path to local .safetensors or .pt weights
+  target_layers: null       # null = all layers; or a list like [0, 6, 12, 18, 23]
+  freeze_model: true
+  patch_mode: false         # set to true automatically when use_patch_tokens=true
+
+lens:
+  lens_type: "affine"       # "affine" | "mlp"
+  bias: true
+  mlp_hidden_dim: null      # Only used when lens_type=mlp; null defaults to d_model
+  mlp_num_layers: 2         # Only used when lens_type=mlp
+  init_from_head: false     # Initialize lens weights from the model's classification head
+  init_from_pretrained: null # Path to a saved lens dir/file for initialization
+  dropout: 0.0
+  use_patch_tokens: false   # true = train on patch neighborhoods instead of CLS token
+  patch_neighbor_size: 3    # k — lens input is a k×k patch neighborhood (must be odd)
+  patch_border: 2           # exclude patches within this many steps of the image edge
+
+data:
+  imagenet_root: ""         # Path to extracted ImageNet (with train/ and val/ subdirs)
+  batch_size: 64
+  num_workers: 4
+  image_size: 224
+  max_images_per_class: null  # null = use all ~1300 images per class; set e.g. 500 to limit
+
+training:
+  lr: 1.0e-3
+  weight_decay: 0.0
+  optimizer: "adam"          # "adam" | "adamw" | "sgd" | "rmsprop" | "nadam"
+  scheduler: "cosine"       # "cosine" | "cosine_warmup" | "step" | "exponential" | "linear" | "plateau" | "none"
+  warmup_steps: 100
+  max_epochs: 10
+  gradient_accumulation_steps: 1
+  val_check_interval: 1.0    # 1.0 = once per epoch; integer N = every N steps
+  loss_type: "kld"           # "kld" | "ce" | "combined"
+  ce_target: "model"         # "model" = model's argmax (default); "gt" = ground truth label
+  ce_weight: 0.1             # Weight for CE when loss_type=combined
+  temperature: 1.0           # Temperature for softmax in KLD computation
+  grad_clip_norm: 1.0
+
+sweep:
+  n_trials: 50
+  max_epochs_per_trial: 3
+  lr_range: [1.0e-5, 1.0e-2]
+  batch_size_choices: [32, 64, 128]
+  optimizer_choices: ["adam", "adamw", "sgd", "rmsprop", "nadam"]
+  scheduler_choices: ["cosine", "cosine_warmup", "step", "exponential", "linear", "plateau", "none"]
+  weight_decay_range: [1.0e-6, 1.0e-2]
+  temperature_range: [0.5, 2.0]
+
+output_dir: "outputs/deit3_large_patch16_224/tuned_lens"
+seed: 42
