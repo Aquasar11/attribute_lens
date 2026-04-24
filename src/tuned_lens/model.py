@@ -58,9 +58,22 @@ class VisionModelWrapper:
                 )
             self.model.load_state_dict(state_dict, strict=False)
         else:
+            create_kwargs: dict[str, Any] = {}
+            if self.config.head_weights_path:
+                create_kwargs["num_classes"] = 1000  # adds nn.Linear(d_model, 1000) as model.head
+
             self.model = timm.create_model(
-                self.config.model_name, pretrained=self.config.pretrained
+                self.config.model_name,
+                pretrained=self.config.pretrained,
+                **create_kwargs,
             )
+
+            if self.config.head_weights_path:
+                _sd = torch.load(
+                    self.config.head_weights_path, map_location="cpu", weights_only=True
+                )
+                self.model.head.weight.data.copy_(_sd["weight"])
+                self.model.head.bias.data.copy_(_sd["bias"])
 
         self.model.eval()
         if self.config.freeze_model:

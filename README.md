@@ -25,6 +25,9 @@ All models are loaded via [timm](https://github.com/huggingface/pytorch-image-mo
 | CLIP ViT-L/14 | `vit_large_patch14_clip_224.openai_ft_in1k` | 14 px | 16×16 | 1024 | 24 |
 | ViT-L/16 (AugReg) | `vit_large_patch16_224.augreg_in21k_ft_in1k` | 16 px | 14×14 | 1024 | 24 |
 | DeiT3-L/16 | `deit3_large_patch16_224.fb_in1k` | 16 px | 14×14 | 1024 | 24 |
+| DINOv2-L/14 | `vit_large_patch14_dinov2.lvd142m` | 14 px | 37×37 | 1024 | 24 |
+
+DINOv2 uses 518×518 input (native resolution). Its timm entry has no pretrained classification head — see [DINOv2 prerequisite](#dinov2-prerequisite-download-classifier-head) below.
 
 Each model has a corresponding default training config in `configs/`:
 
@@ -33,6 +36,7 @@ Each model has a corresponding default training config in `configs/`:
 | `configs/default.yaml` | CLIP ViT-L/14 |
 | `configs/default_vit_l16.yaml` | ViT-L/16 |
 | `configs/default_deit3_l16.yaml` | DeiT3-L/16 |
+| `configs/default_dinov2_l14.yaml` | DINOv2-L/14 |
 
 ---
 
@@ -77,6 +81,19 @@ Forward hooks on `model.blocks[i]` capture `[B, 1+H*W, d_model]`. CLS (position 
 ```bash
 pip install -e ".[dev]"
 ```
+
+---
+
+## DINOv2 prerequisite: download classifier head
+
+DINOv2's timm backbone (`vit_large_patch14_dinov2.lvd142m`) ships without a pretrained classification head. Before training or running notebooks with DINOv2, download the head weights once from `facebook/dinov2-large-imagenet1k-1-layer`:
+
+```bash
+pip install transformers
+python -m tuned_lens.scripts.download_dinov2_head --output dinov2_large_imagenet1k_head.pt
+```
+
+This saves `{'weight': [1000, 1024], 'bias': [1000]}` to `dinov2_large_imagenet1k_head.pt`. The `configs/default_dinov2_l14.yaml` config points to this file via `model.head_weights_path`.
 
 ---
 
@@ -150,6 +167,13 @@ python -m tuned_lens.scripts.train \
   --imagenet-root /path/to/imagenet
 ```
 
+**DINOv2-L/14** (requires head weights downloaded first, see [prerequisite](#dinov2-prerequisite-download-classifier-head)):
+```bash
+python -m tuned_lens.scripts.train \
+  --config configs/default_dinov2_l14.yaml \
+  --imagenet-root /path/to/imagenet
+```
+
 **Common overrides** (append to any command above):
 ```bash
   --lr 5e-4 --batch-size 128 --epochs 20 \
@@ -175,6 +199,7 @@ Where `<model_short>` is the part of the model name before the first dot, e.g.:
 - `vit_large_patch14_clip_224` for CLIP ViT-L/14
 - `vit_large_patch16_224` for ViT-L/16
 - `deit3_large_patch16_224` for DeiT3-L/16
+- `vit_large_patch14_dinov2` for DINOv2-L/14
 
 > The lens configs in `configs/` (e.g. `affine_kld.yaml`, `mlp_kld.yaml`) use the same
 > defaults but different loss/architecture combinations. Pass `--config configs/affine_kld.yaml`

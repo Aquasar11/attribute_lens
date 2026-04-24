@@ -49,6 +49,7 @@ class ModelConfig:
     model_name: str = "vit_large_patch14_clip_224.openai_ft_in1k"
     pretrained: bool = True
     weights_path: str | None = None
+    head_weights_path: str | None = None  # path to .pt with 'weight'/'bias' keys for model.head
     target_layers: list[int] | None = None  # None = all layers
     freeze_model: bool = True
     patch_mode: bool = False  # capture all patch tokens instead of CLS token
