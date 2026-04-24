@@ -78,9 +78,12 @@ class LayerAvgSection:
 
 @dataclass
 class NeighborAvgSection:
-    """Neighbor-averaging settings for patches."""
+    """Neighbor-averaging settings for patches using Gaussian kernels."""
     enabled: bool = False
-    size: int = 3                  # N in N×N square of neighbors; must be odd
+    kernel_sizes: list[int] = field(default_factory=lambda: [3])  # odd integers, e.g. [1, 3, 5]
+    gaussian_std: float = 1.0      # std for all Gaussian kernels
+    aggregation: str = "weighted_avg"  # "weighted_avg" | "rank_sum"
+    aggregation_weights: list[float] = field(default_factory=lambda: [1.0])  # one per kernel_size; normalized internally
     mode: str = "score"            # "score" | "embedding" | "both"
 
 

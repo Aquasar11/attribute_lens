@@ -247,15 +247,41 @@ def _compute_batch_score_maps(
                 patch_states_i = {l: batch_patch_states[l][i: i + 1] for l in batch_patch_states}
                 result[i][scorer_name] = scorer.score_all_layers(patch_states_i, y_hats[i])  # type: ignore[attr-defined]
 
+    # Invariant check: only PatchLensScorer is allowed to produce NaN (it
+    # intentionally sets border patches to NaN because the patch lens needs a
+    # full k×k neighbourhood).  Every other scorer must cover ALL tokens
+    # including image borders.  Warn loudly if that invariant is broken so
+    # numerical issues or future scorers that accidentally skip borders are
+    # caught at runtime rather than silently biasing the evaluation.
+    for scorer_name, scorer in active_scorers_list:
+        if isinstance(scorer, PatchLensScorer):
+            continue
+        for i in range(n_images):
+            for layer, sm in result[i].get(scorer_name, {}).items():
+                if torch.isnan(sm).any():
+                    print(
+                        f"  [warning] {scorer_name} layer {layer} image {i}: "
+                        f"unexpected NaN in score map — this scorer should "
+                        f"produce valid scores for every token including borders"
+                    )
+
     if neighbor_cfg is None or not neighbor_cfg.enabled:
         return result
 
     mode = neighbor_cfg.mode
-    nb_size = neighbor_cfg.size
+    kernel_sizes = neighbor_cfg.kernel_sizes
+    gaussian_std = neighbor_cfg.gaussian_std
+    aggregation = neighbor_cfg.aggregation
+    aggregation_weights = neighbor_cfg.aggregation_weights
 
     # --- Embedding-level neighbor averaging: batch conv2d over all B images ---
     if mode in ("embedding", "both"):
-        ne_states = neighbor_avg_embeddings(batch_patch_states, size=nb_size)
+        ne_states = neighbor_avg_embeddings(
+            batch_patch_states,
+            kernel_sizes=kernel_sizes,
+            gaussian_std=gaussian_std,
+            aggregation_weights=aggregation_weights,
+        )
         for scorer_name, scorer in active_scorers_list:
             if hasattr(scorer, "score_all_layers_batch"):
                 per_image_ne = scorer.score_all_layers_batch(ne_states, y_hats)  # type: ignore[attr-defined]
@@ -271,7 +297,13 @@ def _compute_batch_score_maps(
         for scorer_name, _ in active_scorers_list:
             for i in range(n_images):
                 result[i][scorer_name + "_ns"] = {
-                    l: neighbor_avg_scores(result[i][scorer_name][l], size=nb_size)
+                    l: neighbor_avg_scores(
+                        result[i][scorer_name][l],
+                        kernel_sizes=kernel_sizes,
+                        gaussian_std=gaussian_std,
+                        aggregation=aggregation,
+                        aggregation_weights=aggregation_weights,
+                    )
                     for l in result[i][scorer_name]
                 }
 
@@ -279,7 +311,13 @@ def _compute_batch_score_maps(
         for scorer_name, _ in active_scorers_list:
             for i in range(n_images):
                 result[i][scorer_name + "_ne_ns"] = {
-                    l: neighbor_avg_scores(result[i][scorer_name + "_ne"][l], size=nb_size)
+                    l: neighbor_avg_scores(
+                        result[i][scorer_name + "_ne"][l],
+                        kernel_sizes=kernel_sizes,
+                        gaussian_std=gaussian_std,
+                        aggregation=aggregation,
+                        aggregation_weights=aggregation_weights,
+                    )
                     for l in result[i][scorer_name + "_ne"]
                 }
 

@@ -36,7 +36,10 @@ eval:
 
   neighbor_avg:
     enabled: false
-    size: 3                     # N in N×N window; must be odd
+    kernel_sizes: [3]           # list of odd kernel sizes, e.g. [1, 3, 5]
+    gaussian_std: 1.0           # std for all Gaussian kernels
+    aggregation: "weighted_avg" # "weighted_avg" | "rank_sum"
+    aggregation_weights: [1.0]  # one weight per kernel_size; normalized internally
     mode: "score"               # "score" | "embedding" | "both"
 
 seed: 42
