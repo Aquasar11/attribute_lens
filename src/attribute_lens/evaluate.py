@@ -270,7 +270,7 @@ def _compute_batch_score_maps(
 
     mode = neighbor_cfg.mode
     kernel_sizes = neighbor_cfg.kernel_sizes
-    gaussian_std = neighbor_cfg.gaussian_std
+    gaussian_stds = neighbor_cfg.gaussian_stds
     aggregation = neighbor_cfg.aggregation
     aggregation_weights = neighbor_cfg.aggregation_weights
 
@@ -279,7 +279,7 @@ def _compute_batch_score_maps(
         ne_states = neighbor_avg_embeddings(
             batch_patch_states,
             kernel_sizes=kernel_sizes,
-            gaussian_std=gaussian_std,
+            gaussian_stds=gaussian_stds,
             aggregation_weights=aggregation_weights,
         )
         for scorer_name, scorer in active_scorers_list:
@@ -300,7 +300,7 @@ def _compute_batch_score_maps(
                     l: neighbor_avg_scores(
                         result[i][scorer_name][l],
                         kernel_sizes=kernel_sizes,
-                        gaussian_std=gaussian_std,
+                        gaussian_stds=gaussian_stds,
                         aggregation=aggregation,
                         aggregation_weights=aggregation_weights,
                     )
@@ -314,7 +314,7 @@ def _compute_batch_score_maps(
                     l: neighbor_avg_scores(
                         result[i][scorer_name + "_ne"][l],
                         kernel_sizes=kernel_sizes,
-                        gaussian_std=gaussian_std,
+                        gaussian_stds=gaussian_stds,
                         aggregation=aggregation,
                         aggregation_weights=aggregation_weights,
                     )

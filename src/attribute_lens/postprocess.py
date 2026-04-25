@@ -92,7 +92,7 @@ def _rank_map(
 def neighbor_avg_embeddings(
     patch_states: dict[int, torch.Tensor],
     kernel_sizes: list[int],
-    gaussian_std: float,
+    gaussian_stds: list[float],
     aggregation_weights: list[float],
 ) -> dict[int, torch.Tensor]:
     """Return patch_states where each position is a multi-kernel Gaussian average.
@@ -111,7 +111,8 @@ def neighbor_avg_embeddings(
     Args:
         patch_states: ``{layer_idx: Tensor[B, H, W, d_model]}``
         kernel_sizes: List of odd kernel side lengths, e.g. ``[1, 3, 5]``.
-        gaussian_std: Standard deviation shared by all Gaussian kernels.
+        gaussian_stds: Per-kernel standard deviations; length must equal
+            ``len(kernel_sizes)``.
         aggregation_weights: One weight per kernel size (will be normalized to
             sum=1 internally).  Length must equal ``len(kernel_sizes)``.
 
@@ -137,9 +138,9 @@ def neighbor_avg_embeddings(
 
         accumulated: torch.Tensor | None = None
 
-        for size, w in zip(kernel_sizes, w_norm):
+        for size, std, w in zip(kernel_sizes, gaussian_stds, w_norm):
             pad = size // 2
-            kernel = _make_gaussian_kernel(size, gaussian_std, device, dtype)  # [size, size]
+            kernel = _make_gaussian_kernel(size, std, device, dtype)  # [size, size]
 
             # Grouped conv2d: one filter per d_model channel
             kernel_4d = kernel.unsqueeze(0).unsqueeze(0).expand(d, 1, size, size).contiguous()
@@ -167,7 +168,7 @@ def neighbor_avg_embeddings(
 def neighbor_avg_scores(
     score_map: torch.Tensor,
     kernel_sizes: list[int],
-    gaussian_std: float,
+    gaussian_stds: list[float],
     aggregation: str,
     aggregation_weights: list[float],
 ) -> torch.Tensor:
@@ -184,7 +185,8 @@ def neighbor_avg_scores(
     Args:
         score_map: ``Tensor[H, W]``, may contain NaN.
         kernel_sizes: List of odd kernel side lengths, e.g. ``[1, 3, 5]``.
-        gaussian_std: Standard deviation shared by all Gaussian kernels.
+        gaussian_stds: Per-kernel standard deviations; length must equal
+            ``len(kernel_sizes)``.
         aggregation: ``"weighted_avg"`` — normalized weighted average of
             per-kernel smoothed maps; ``"rank_sum"`` — for each kernel rank
             positions by smoothed score (descending), sum ranks, re-rank
@@ -206,10 +208,10 @@ def neighbor_avg_scores(
     filled_v = (filled * valid).unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
     valid_v = valid.unsqueeze(0).unsqueeze(0)              # [1, 1, H, W]
 
-    def _smooth_one(size: int) -> torch.Tensor:
-        """Gaussian-smooth score_map with a kernel of given size."""
+    def _smooth_one(size: int, std: float) -> torch.Tensor:
+        """Gaussian-smooth score_map with a kernel of given size and std."""
         pad = size // 2
-        kernel = _make_gaussian_kernel(size, gaussian_std, device, dtype)
+        kernel = _make_gaussian_kernel(size, std, device, dtype)
         k4 = kernel.unsqueeze(0).unsqueeze(0)                              # [1,1,s,s]
         num = F.conv2d(filled_v, k4, padding=pad)[0, 0]                   # [H, W]
         den = F.conv2d(valid_v, k4, padding=pad)[0, 0]                    # [H, W]
@@ -222,8 +224,8 @@ def neighbor_avg_scores(
         w_norm = [w / w_total for w in aggregation_weights]
 
         accumulated: torch.Tensor | None = None
-        for size, w in zip(kernel_sizes, w_norm):
-            smoothed = _smooth_one(size)
+        for size, std, w in zip(kernel_sizes, gaussian_stds, w_norm):
+            smoothed = _smooth_one(size, std)
             # Treat NaN as 0 for accumulation (restored at the end)
             contrib = smoothed.nan_to_num(0.0) * w
             accumulated = contrib if accumulated is None else accumulated + contrib
@@ -235,8 +237,8 @@ def neighbor_avg_scores(
     elif aggregation == "rank_sum":
         # Compute per-kernel smoothed maps and rank them
         total_rank = torch.zeros(H, W, device=device, dtype=torch.float32)
-        for size in kernel_sizes:
-            smoothed = _smooth_one(size)
+        for size, std in zip(kernel_sizes, gaussian_stds):
+            smoothed = _smooth_one(size, std)
             total_rank += _rank_map(smoothed, nan_mask)
 
         # Tie-break: rank from the 1×1 kernel (= original score, no smoothing)
