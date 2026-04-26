@@ -31,7 +31,7 @@ training:
   optimizer: "adam"          # "adam" | "adamw" | "sgd" | "rmsprop" | "nadam"
   scheduler: "cosine"       # "cosine" | "cosine_warmup" | "step" | "exponential" | "linear" | "plateau" | "none"
   warmup_steps: 100
-  max_epochs: 10
+  max_epochs: 50
   gradient_accumulation_steps: 1
   val_check_interval: 1.0    # 1.0 = once per epoch; integer N = every N steps
   loss_type: "kld"           # "kld" | "ce" | "combined"
