@@ -83,13 +83,22 @@ class PatchMapLightningModule(pl.LightningModule):
             d_model=self.model_wrapper.d_model,
         )
 
-        self.best_val_loss: dict[int, float] = {
-            i: float("inf") for i in self.model_wrapper.target_layers
+        # Best-map tracking uses layer weight (maximize), not val loss (minimize)
+        self.best_val_weight: dict[int, float] = {
+            i: -1.0 for i in self.model_wrapper.target_layers
         }
+        # Per-epoch cosine-similarity accumulators, reset each validation epoch
+        self._val_fg_sims: dict[int, list] = {i: [] for i in self.model_wrapper.target_layers}
+        self._val_bg_sims: dict[int, list] = {i: [] for i in self.model_wrapper.target_layers}
 
     def setup(self, stage: str | None = None) -> None:
         """Move the frozen backbone to the training device."""
         self.model_wrapper.to(self.device)
+
+    def on_validation_epoch_start(self) -> None:
+        for layer_idx in self.model_wrapper.target_layers:
+            self._val_fg_sims[layer_idx] = []
+            self._val_bg_sims[layer_idx] = []
 
     # ------------------------------------------------------------------
     # Loss computation
@@ -159,6 +168,15 @@ class PatchMapLightningModule(pl.LightningModule):
                 self.log("train/bg_patches", float(bg_mask.sum()), on_step=True, on_epoch=False)
                 logged_counts = True
 
+            # Accumulate cosine similarities for val-epoch layer weight computation
+            if stage == "val":
+                with torch.no_grad():
+                    y_norm   = F.normalize(y.float(), p=2, dim=-1)          # [B, H*W, d]
+                    cls_norm = F.normalize(cls.float(), p=2, dim=-1)        # [B, d]
+                    sims     = (y_norm * cls_norm.unsqueeze(1)).sum(dim=-1) # [B, H*W]
+                self._val_fg_sims[layer_idx].extend(sims[fg_mask].cpu().tolist())
+                self._val_bg_sims[layer_idx].extend(sims[bg_mask].cpu().tolist())
+
             total_loss = total_loss + layer_loss
             n_layers += 1
 
@@ -179,23 +197,40 @@ class PatchMapLightningModule(pl.LightningModule):
         self._compute_loss(batch, "val")
 
     def on_validation_epoch_end(self) -> None:
-        """Save best map per layer when validation loss improves."""
+        """Compute per-layer FG/BG discriminability weights and save best maps."""
+        _EPS = 1e-6
+        layer_weights = []
+
         for layer_idx in self.model_wrapper.target_layers:
-            key = f"val/loss_layer_{layer_idx}"
-            current = self.trainer.callback_metrics.get(key)
-            if current is not None and current.item() < self.best_val_loss[layer_idx]:
-                self.best_val_loss[layer_idx] = current.item()
+            fg_vals = self._val_fg_sims[layer_idx]
+            bg_vals = self._val_bg_sims[layer_idx]
+            if not fg_vals or not bg_vals:
+                continue
+
+            fg = torch.tensor(fg_vals)
+            bg = torch.tensor(bg_vals)
+            w = float(max(fg.mean() - bg.mean(), 0.0) / (fg.std() + bg.std() + _EPS))
+            layer_weights.append(w)
+
+            self.log(f"val/layer_weight_{layer_idx}", w, on_epoch=True)
+
+            if w > self.best_val_weight[layer_idx]:
+                self.best_val_weight[layer_idx] = w
                 save_dir = os.path.join(self.config.output_dir, "best_maps")
                 self.map_bank.maps[str(layer_idx)].save(
                     os.path.join(save_dir, f"layer_{layer_idx}.pt"),
                     metadata={
                         "layer_idx": layer_idx,
-                        "val_loss": current.item(),
+                        "val_layer_weight": w,
                         "epoch": self.current_epoch,
                         "model_name": self.config.model.model_name,
                         "map_type": self.config.patch_map.map_type,
                     },
                 )
+
+        if layer_weights:
+            avg_w = sum(layer_weights) / len(layer_weights)
+            self.log("val/layer_weight_avg", avg_w, prog_bar=True, on_epoch=True)
 
     # ------------------------------------------------------------------
     # Optimizer / scheduler — mirrors trainer.py patterns

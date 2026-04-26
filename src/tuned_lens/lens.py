@@ -103,31 +103,31 @@ class LensBank(nn.Module):
         target_layers: list[int],
         d_model: int,
         num_classes: int,
-        head_weight: torch.Tensor | None = None,
-        head_bias: torch.Tensor | None = None,
         patch_neighbor_size: int = 1,
     ) -> LensBank:
         """Factory method to create a LensBank.
+
+        Both CLS and patch lenses map to d_model (embedding space); the frozen
+        classification head is applied in the trainer to produce logits.
 
         Args:
             config: Lens configuration.
             target_layers: List of layer indices to create lenses for.
             d_model: Hidden state dimension of the model.
-            num_classes: Number of output classes.
-            head_weight: Optional pretrained head weight for initialization.
-            head_bias: Optional pretrained head bias for initialization.
+            num_classes: Number of output classes (unused here; kept for call-site compat).
+            patch_neighbor_size: k — patch lens input is k*k*d_model.
         """
         lenses: dict[int, BaseLens] = {}
 
-        # When training on patch neighborhoods, input to each lens is k*k*d_model
         lens_in = d_model * patch_neighbor_size * patch_neighbor_size
+        lens_out = d_model  # always: lens maps to embedding space, head applied in trainer
 
         for layer_idx in target_layers:
             if config.lens_type == "mlp":
                 hidden_dim = config.mlp_hidden_dim or d_model
                 lens = MLPLens(
                     d_model=lens_in,
-                    num_classes=num_classes,
+                    num_classes=lens_out,
                     hidden_dim=hidden_dim,
                     num_layers=config.mlp_num_layers,
                     dropout=config.dropout,
@@ -135,15 +135,14 @@ class LensBank(nn.Module):
             else:  # affine
                 lens = AffineLens(
                     d_model=lens_in,
-                    num_classes=num_classes,
+                    num_classes=lens_out,
                     bias=config.bias,
                 )
 
-            # Initialize from pretrained head weights if requested
-            if config.init_from_head and head_weight is not None:
-                _init_from_head(lens, head_weight, head_bias)
+            if config.init_mode == "identity" and isinstance(lens, AffineLens):
+                _init_identity(lens, d_model, patch_neighbor_size)
 
-            # Initialize from a saved lens file if requested
+            # init_from_pretrained overrides init_mode
             if config.init_from_pretrained is not None:
                 _init_from_pretrained(lens, config.init_from_pretrained, layer_idx)
 
@@ -166,27 +165,24 @@ class LensBank(nn.Module):
                 self.lenses[layer_idx_str].load_state_dict(payload["state_dict"])
 
 
-def _init_from_head(
-    lens: BaseLens,
-    head_weight: torch.Tensor,
-    head_bias: torch.Tensor | None,
-) -> None:
-    """Copy pretrained classification head weights into a lens."""
-    if isinstance(lens, AffineLens):
-        lens.linear.weight.data.copy_(head_weight)
-        if head_bias is not None and lens.linear.bias is not None:
-            lens.linear.bias.data.copy_(head_bias)
-    elif isinstance(lens, MLPLens):
-        # For MLP, initialize only the last linear layer from the head
-        last_linear = None
-        for module in reversed(list(lens.net.modules())):
-            if isinstance(module, nn.Linear):
-                last_linear = module
-                break
-        if last_linear is not None and last_linear.out_features == head_weight.shape[0]:
-            last_linear.weight.data.copy_(head_weight)
-            if head_bias is not None and last_linear.bias is not None:
-                last_linear.bias.data.copy_(head_bias)
+def _init_identity(lens: AffineLens, d_model: int, patch_neighbor_size: int) -> None:
+    """Initialize an AffineLens weight to identity (or center-patch identity for k>1).
+
+    - k=1 (square weight): standard identity matrix.
+    - k>1 (patch neighborhood): weight is [d_model, k*k*d_model]. Initialize so the
+      lens outputs the center patch unchanged and ignores the surrounding neighbors.
+      This is the natural no-op starting point for a neighborhood lens.
+    """
+    k = patch_neighbor_size
+    w = lens.linear.weight.data
+    w.zero_()
+    if k == 1:
+        nn.init.eye_(w)
+    else:
+        center = (k * k) // 2  # e.g. 4 for k=3
+        w[:, center * d_model: (center + 1) * d_model] = torch.eye(d_model)
+    if lens.linear.bias is not None:
+        nn.init.zeros_(lens.linear.bias)
 
 
 def _init_from_pretrained(lens: BaseLens, pretrained_path: str, layer_idx: int) -> None:

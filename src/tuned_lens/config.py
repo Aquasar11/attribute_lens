@@ -62,7 +62,7 @@ class LensConfig:
     bias: bool = True
     mlp_hidden_dim: int | None = None
     mlp_num_layers: int = 2
-    init_from_head: bool = False
+    init_mode: str = "identity"      # "identity" | "random"
     init_from_pretrained: str | None = None  # Path to a saved lens .pt file
     dropout: float = 0.0
     use_patch_tokens: bool = False   # train on patch tokens instead of CLS token

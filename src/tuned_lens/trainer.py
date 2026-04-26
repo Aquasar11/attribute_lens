@@ -53,18 +53,12 @@ class TunedLensLightningModule(pl.LightningModule):
         self.model_wrapper = VisionModelWrapper(config.model, device="cpu")
 
         # Trainable lens bank
-        head_weight, head_bias = (None, None)
-        if config.lens.init_from_head:
-            head_weight, head_bias = self.model_wrapper.get_head_parameters()
-
         k = config.lens.patch_neighbor_size if config.lens.use_patch_tokens else 1
         self.lens_bank = LensBank.create(
             config=config.lens,
             target_layers=self.model_wrapper.target_layers,
             d_model=self.model_wrapper.d_model,
             num_classes=self.model_wrapper.num_classes,
-            head_weight=head_weight,
-            head_bias=head_bias,
             patch_neighbor_size=k,
         )
 
@@ -95,7 +89,13 @@ class TunedLensLightningModule(pl.LightningModule):
         gt_labels: torch.Tensor,
         stage: str,
     ) -> torch.Tensor:
-        """Standard CLS-token loss (original behaviour)."""
+        """CLS-token loss with the tuned-lens formulation.
+
+        The lens maps each intermediate CLS embedding to the d_model embedding
+        space (predicting the final-layer CLS token), then the frozen classification
+        head is applied to obtain logits.  This is compared against the model's
+        actual output logits via KLD.
+        """
         hidden_states, target_logits = self.model_wrapper.extract(images)
 
         total_loss = torch.tensor(0.0, device=self.device)
@@ -103,7 +103,8 @@ class TunedLensLightningModule(pl.LightningModule):
 
         for layer_idx in target_layers:
             cls_token = hidden_states[layer_idx].to(self.device)
-            lens_logits = self.lens_bank(layer_idx, cls_token)
+            lens_embedding = self.lens_bank(layer_idx, cls_token)      # [B, d_model]
+            lens_logits = self.model_wrapper.model.head(lens_embedding) # [B, num_classes]
 
             layer_loss = self.loss_fn(lens_logits, target_logits.detach(), gt_labels)
 
@@ -165,7 +166,8 @@ class TunedLensLightningModule(pl.LightningModule):
             # [num_valid*B, k*k*d_model]
             nb_tensor = torch.stack(neighborhoods, dim=0).view(num_valid * B, k * k * d_model)
 
-            lens_logits = self.lens_bank(layer_idx, nb_tensor)  # [num_valid*B, num_classes]
+            lens_embedding = self.lens_bank(layer_idx, nb_tensor)           # [num_valid*B, d_model]
+            lens_logits = self.model_wrapper.model.head(lens_embedding)     # [num_valid*B, num_classes]
 
             # Replicate targets and labels for each patch
             target_rep = target_logits.unsqueeze(0).expand(num_valid, -1, -1).reshape(num_valid * B, -1)

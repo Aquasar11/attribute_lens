@@ -56,10 +56,10 @@ class _EpochLogger(pl.Callback):
         if trainer.sanity_checking:
             return
         m = trainer.callback_metrics
-        val_loss = m.get("val/loss_avg", float("nan"))
+        val_w = m.get("val/layer_weight_avg", float("nan"))
         print(
             f"[Epoch {trainer.current_epoch + 1}/{trainer.max_epochs}] "
-            f"val_loss={val_loss:.4f}",
+            f"val_layer_weight_avg={val_w:.4f}",
             flush=True,
         )
 
@@ -150,10 +150,10 @@ def _build_callbacks(config: PatchMapFullConfig) -> list:
     callbacks = [
         pl.callbacks.ModelCheckpoint(
             dirpath=f"{config.output_dir}/checkpoints",
-            monitor="val/loss_avg",
-            mode="min",
+            monitor="val/layer_weight_avg",
+            mode="max",
             save_top_k=3,
-            filename="epoch{epoch:02d}-val_loss{val/loss_avg:.4f}",
+            filename="epoch{epoch:02d}-val_w{val/layer_weight_avg:.4f}",
             auto_insert_metric_name=False,
         ),
         pl.callbacks.LearningRateMonitor(logging_interval="step"),
@@ -162,9 +162,9 @@ def _build_callbacks(config: PatchMapFullConfig) -> list:
     if config.training.early_stopping_patience is not None:
         callbacks.append(
             pl.callbacks.EarlyStopping(
-                monitor="val/loss_avg",
+                monitor="val/layer_weight_avg",
                 patience=config.training.early_stopping_patience,
-                mode="min",
+                mode="max",
             )
         )
     return callbacks
