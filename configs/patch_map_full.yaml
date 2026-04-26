@@ -18,8 +18,8 @@ data:
   imagenet_root: "/opt/models/datasets/imagenet/extracted"          # e.g. /opt/models/datasets/imagenet
   bbox_dir_train: "/opt/models/datasets/imagenet/boxes/train"         # e.g. /opt/models/datasets/imagenet/boxes/train
   bbox_dir_val: "/opt/models/datasets/imagenet/boxes/val"           # e.g. /opt/models/datasets/imagenet/boxes/val
-  batch_size: 128
-  num_workers: 4
+  batch_size: 512
+  num_workers: 20
   max_images_per_class: null  # null = use all; set e.g. 50 for quick smoke test
 
 training:
@@ -28,10 +28,10 @@ training:
   optimizer: "adam"     # "adam" | "adamw" | "sgd" | "rmsprop"
   scheduler: "cosine"   # "cosine" | "step" | "plateau" | "none"
   warmup_steps: 100
-  max_epochs: 50
+  max_epochs: 25
   grad_clip_norm: 1.0
   val_check_interval: 1.0
-  early_stopping_patience: 10  # null = disabled; set e.g. 10 to enable
+  early_stopping_patience: 5  # null = disabled; set e.g. 10 to enable
 
-output_dir: "outputs/patch_map_full"
+output_dir: "outputs/clip/patch_map_full"
 seed: 42
