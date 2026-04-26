@@ -19,11 +19,11 @@ lens:
   patch_border: 2           # exclude patches within this many steps of the image edge
 
 data:
-  imagenet_root: ""         # Path to extracted ImageNet (with train/ and val/ subdirs)
-  batch_size: 64
-  num_workers: 4
+  imagenet_root: "/opt/models/datasets/imagenet/extracted"         # Path to extracted ImageNet (with train/ and val/ subdirs)
+  batch_size: 256
+  num_workers: 20
   image_size: 224
-  max_images_per_class: null  # null = use all ~1300 images per class; set e.g. 500 to limit
+  max_images_per_class: 500  # null = use all ~1300 images per class; set e.g. 500 to limit
 
 training:
   lr: 1.0e-3
@@ -31,7 +31,7 @@ training:
   optimizer: "adam"          # "adam" | "adamw" | "sgd" | "rmsprop" | "nadam"
   scheduler: "cosine"       # "cosine" | "cosine_warmup" | "step" | "exponential" | "linear" | "plateau" | "none"
   warmup_steps: 100
-  max_epochs: 10
+  max_epochs: 50
   gradient_accumulation_steps: 1
   val_check_interval: 1.0    # 1.0 = once per epoch; integer N = every N steps
   loss_type: "kld"           # "kld" | "ce" | "combined"

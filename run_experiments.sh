@@ -10,15 +10,8 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
 CONFIGS=(
-    "configs/experiments/exp_no_nb_no_la.yaml"
-    "configs/experiments/exp_no_nb_la_uniform.yaml"
-    "configs/experiments/exp_no_nb_la_weighted.yaml"
-    "configs/experiments/exp_nb_emb_no_la.yaml"
-    "configs/experiments/exp_nb_emb_la_uniform.yaml"
-    "configs/experiments/exp_nb_emb_la_weighted.yaml"
-    "configs/experiments/exp_nb_score_no_la.yaml"
-    "configs/experiments/exp_nb_score_la_uniform.yaml"
-    "configs/experiments/exp_nb_score_la_weighted.yaml"
+    "configs/experiments/exp_nb_score_la_weighted_14.yaml"
+    "configs/experiments/exp_nb_score_la_weighted_15.yaml"
 )
 
 TOTAL=${#CONFIGS[@]}

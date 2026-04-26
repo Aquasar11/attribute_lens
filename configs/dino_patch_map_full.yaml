@@ -1,0 +1,38 @@
+model:
+  model_name: "vit_large_patch14_dinov2.lvd142m"
+  pretrained: true
+  weights_path: null        # Optional: path to local .safetensors or .pt weights
+  head_weights_path: "dinov2_large_imagenet1k_head.pt"  # from download_dinov2_head.py
+  target_layers: null       # null = all layers; or a list like [0, 6, 12, 18, 23]
+  freeze_model: true
+  patch_mode: false         # set to true automatically when use_patch_tokens=true
+
+patch_map:
+  map_type: "full"  # "full" | "low_rank"
+  rank: 128             # only used when map_type == "low_rank"
+  fg_threshold: 0.80    # patch overlap >= this -> foreground
+  bg_threshold: 0.20    # patch overlap <= this -> background
+  neg_weight: 0.5       # weight on the repulsion term
+  neg_clip: 0.3         # clamp for negative MSE before weighting
+
+data:
+  imagenet_root: "/opt/models/datasets/imagenet/extracted"          # e.g. /opt/models/datasets/imagenet
+  bbox_dir_train: "/opt/models/datasets/imagenet/boxes/train"         # e.g. /opt/models/datasets/imagenet/boxes/train
+  bbox_dir_val: "/opt/models/datasets/imagenet/boxes/val"           # e.g. /opt/models/datasets/imagenet/boxes/val
+  batch_size: 128
+  num_workers: 4
+  max_images_per_class: null  # null = use all; set e.g. 50 for quick smoke test
+
+training:
+  lr: 1.0e-3
+  weight_decay: 0.0
+  optimizer: "adam"     # "adam" | "adamw" | "sgd" | "rmsprop"
+  scheduler: "cosine"   # "cosine" | "step" | "plateau" | "none"
+  warmup_steps: 100
+  max_epochs: 50
+  grad_clip_norm: 1.0
+  val_check_interval: 1.0
+  early_stopping_patience: 10  # null = disabled; set e.g. 10 to enable
+
+output_dir: "outputs/vit_large_patch14_dinov2/patch_map_full"
+seed: 42
