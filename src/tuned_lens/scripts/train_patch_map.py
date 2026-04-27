@@ -180,10 +180,12 @@ def main() -> None:
 
     pl.seed_everything(config.seed, workers=True)
 
-    # Build transforms from a throw-away model wrapper
+    # Build transforms and extract grid geometry from a throw-away model wrapper
     tmp_wrapper = VisionModelWrapper(config.model, device="cpu")
     train_transform = tmp_wrapper.get_train_transform()
     val_transform = tmp_wrapper.get_transform()
+    grid_size = tmp_wrapper.patch_grid_size[0]
+    patch_size = 224 // grid_size
     tmp_wrapper.cleanup()
     del tmp_wrapper
 
@@ -191,6 +193,10 @@ def main() -> None:
         config.data,
         train_transform=train_transform,
         val_transform=val_transform,
+        grid_size=grid_size,
+        patch_size=patch_size,
+        fg_threshold=config.patch_map.fg_threshold,
+        bg_threshold=config.patch_map.bg_threshold,
     )
 
     module = PatchMapLightningModule(config)

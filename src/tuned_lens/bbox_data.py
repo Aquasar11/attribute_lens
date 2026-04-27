@@ -1,8 +1,9 @@
 """Bbox-aware ImageNet dataset for contrastive patch map training.
 
 Only images that have a matching Pascal-VOC XML annotation are included.
-Each sample returns (image_tensor, class_idx, bboxes_224) where bboxes_224
-are the annotation boxes transformed into the 224×224 crop coordinate space.
+Each sample returns (image_tensor, class_idx, fg_mask, bg_mask) where the
+masks are pre-computed in the dataloader worker so they arrive at the
+training step as stacked tensors — no per-batch CPU loop in the hot path.
 """
 
 from __future__ import annotations
@@ -87,16 +88,6 @@ def transform_bboxes_224(
     return result
 
 
-def _box_intersection_area(box_a: tuple, box_b: tuple) -> float:
-    x0 = max(box_a[0], box_b[0])
-    y0 = max(box_a[1], box_b[1])
-    x1 = min(box_a[2], box_b[2])
-    y1 = min(box_a[3], box_b[3])
-    if x1 <= x0 or y1 <= y0:
-        return 0.0
-    return (x1 - x0) * (y1 - y0)
-
-
 def classify_patches(
     bboxes_224: list[dict],
     grid_size: int,
@@ -110,6 +101,8 @@ def classify_patches(
     its area.  It is *background* if that overlap <= bg_threshold.  Patches
     in between are ignored during training.
 
+    Uses fully-vectorised numpy operations — no Python loop over patches.
+
     Args:
         bboxes_224:   Bounding boxes in 224px crop space (xmin/ymin/xmax/ymax).
         grid_size:    Number of patches per spatial side (e.g. 16 for ViT-L/14).
@@ -121,28 +114,40 @@ def classify_patches(
         fg_mask: bool array [grid_size, grid_size]
         bg_mask: bool array [grid_size, grid_size]
     """
-    fg_mask = np.zeros((grid_size, grid_size), dtype=bool)
-    bg_mask = np.zeros((grid_size, grid_size), dtype=bool)
-
     if not bboxes_224:
-        bg_mask[:] = True
+        fg_mask = np.zeros((grid_size, grid_size), dtype=bool)
+        bg_mask = np.ones((grid_size, grid_size), dtype=bool)
         return fg_mask, bg_mask
 
     patch_area = float(patch_size * patch_size)
-    boxes = [(b["xmin"], b["ymin"], b["xmax"], b["ymax"]) for b in bboxes_224]
 
-    for row in range(grid_size):
-        for col in range(grid_size):
-            x0 = col * patch_size
-            y0 = row * patch_size
-            patch = (x0, y0, x0 + patch_size, y0 + patch_size)
-            overlap = sum(_box_intersection_area(patch, box) for box in boxes)
-            ratio = min(overlap / patch_area, 1.0)
+    # Patch grid edges
+    idx = np.arange(grid_size)
+    px0 = idx * patch_size          # [W] left edges
+    px1 = px0 + patch_size          # [W] right edges
+    py0 = idx * patch_size          # [H] top edges
+    py1 = py0 + patch_size          # [H] bottom edges
 
-            if ratio >= fg_threshold:
-                fg_mask[row, col] = True
-            elif ratio <= bg_threshold:
-                bg_mask[row, col] = True
+    # Bounding boxes [K, 4]
+    boxes = np.array([[b["xmin"], b["ymin"], b["xmax"], b["ymax"]] for b in bboxes_224])
+    bx0, by0, bx1, by1 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+
+    # Intersection extents: [W, K] and [H, K]
+    inter_w = np.maximum(
+        0.0,
+        np.minimum(px1[:, None], bx1[None, :]) - np.maximum(px0[:, None], bx0[None, :]),
+    )
+    inter_h = np.maximum(
+        0.0,
+        np.minimum(py1[:, None], by1[None, :]) - np.maximum(py0[:, None], by0[None, :]),
+    )
+
+    # Total overlap per (row, col): sum over all K boxes → [H, W]
+    overlap = (inter_h[:, None, :] * inter_w[None, :, :]).sum(axis=2)
+    ratio = np.minimum(overlap / patch_area, 1.0)
+
+    fg_mask = ratio >= fg_threshold
+    bg_mask = ratio <= bg_threshold
 
     return fg_mask, bg_mask
 
@@ -163,11 +168,15 @@ def _build_class_to_idx(train_dir: Path) -> dict[str, int]:
 class BboxImageNetDataset(Dataset):
     """ImageNet dataset filtered to images that have bbox XML annotations.
 
-    Returns per item: ``(image_tensor, class_idx, bboxes_224)``
+    Returns per item: ``(image_tensor, class_idx, fg_mask, bg_mask)``
 
     - *image_tensor*: transformed image [C, H, W]
     - *class_idx*: integer class label
-    - *bboxes_224*: list of dicts with keys xmin/ymin/xmax/ymax in 224px space
+    - *fg_mask*: bool tensor [H*W] — True for foreground patches
+    - *bg_mask*: bool tensor [H*W] — True for background patches
+
+    Patch classification runs in the dataloader worker process, fully
+    overlapping with GPU forward passes in the main training loop.
     """
 
     def __init__(
@@ -177,12 +186,20 @@ class BboxImageNetDataset(Dataset):
         transform: Callable,
         split: str,
         class_to_idx: dict[str, int],
+        grid_size: int,
+        patch_size: int,
+        fg_threshold: float,
+        bg_threshold: float,
     ) -> None:
         self.image_dir = Path(image_dir)
         self.bbox_dir = Path(bbox_dir)
         self.transform = transform
         self.split = split
         self.class_to_idx = class_to_idx
+        self.grid_size = grid_size
+        self.patch_size = patch_size
+        self.fg_threshold = fg_threshold
+        self.bg_threshold = bg_threshold
 
         # samples: list of (img_path, class_idx, xml_path)
         self.samples: list[tuple[Path, int, Path]] = []
@@ -231,16 +248,26 @@ class BboxImageNetDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int, list[dict]]:
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int, torch.Tensor, torch.Tensor]:
         img_path, class_idx, xml_path = self.samples[idx]
 
         bboxes_orig, orig_w, orig_h = parse_bbox_xml(xml_path)
         bboxes_224 = transform_bboxes_224(bboxes_orig, orig_w, orig_h)
 
+        fg, bg = classify_patches(
+            bboxes_224, self.grid_size, self.patch_size,
+            self.fg_threshold, self.bg_threshold,
+        )
+
         img = Image.open(img_path).convert("RGB")
         img_tensor = self.transform(img)
 
-        return img_tensor, class_idx, bboxes_224
+        return (
+            img_tensor,
+            class_idx,
+            torch.from_numpy(fg.reshape(-1)),   # [H*W]
+            torch.from_numpy(bg.reshape(-1)),   # [H*W]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -248,13 +275,14 @@ class BboxImageNetDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 def bbox_collate_fn(
-    batch: list[tuple[torch.Tensor, int, list[dict]]]
-) -> tuple[torch.Tensor, torch.Tensor, list[list[dict]]]:
-    """Collate fn that keeps bboxes as a list-of-lists (variable length)."""
-    images = torch.stack([item[0] for item in batch])
-    labels = torch.tensor([item[1] for item in batch], dtype=torch.long)
-    bboxes_list = [item[2] for item in batch]
-    return images, labels, bboxes_list
+    batch: list[tuple[torch.Tensor, int, torch.Tensor, torch.Tensor]]
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Collate fn that stacks pre-computed fg/bg masks as bool tensors."""
+    images   = torch.stack([item[0] for item in batch])
+    labels   = torch.tensor([item[1] for item in batch], dtype=torch.long)
+    fg_masks = torch.stack([item[2] for item in batch])  # [B, H*W]
+    bg_masks = torch.stack([item[3] for item in batch])  # [B, H*W]
+    return images, labels, fg_masks, bg_masks
 
 
 def _subsample_by_class(
@@ -274,14 +302,25 @@ def create_bbox_dataloaders(
     config: PatchMapDataConfig,
     train_transform: Callable,
     val_transform: Callable,
+    grid_size: int,
+    patch_size: int,
+    fg_threshold: float,
+    bg_threshold: float,
 ) -> tuple[DataLoader, DataLoader]:
-    """Create train and val DataLoaders with bbox annotations.
+    """Create train and val DataLoaders with pre-computed fg/bg patch masks.
 
-    Both loaders use ``bbox_collate_fn`` so that the variable-length bbox
-    lists are not converted to a tensor.
+    Patch classification is performed in the dataloader worker processes,
+    running in parallel with the GPU forward pass.
     """
     train_dir = Path(config.imagenet_root) / "train"
     class_to_idx = _build_class_to_idx(train_dir)
+
+    classify_kwargs = dict(
+        grid_size=grid_size,
+        patch_size=patch_size,
+        fg_threshold=fg_threshold,
+        bg_threshold=bg_threshold,
+    )
 
     train_dataset = BboxImageNetDataset(
         image_dir=train_dir,
@@ -289,6 +328,7 @@ def create_bbox_dataloaders(
         transform=train_transform,
         split="train",
         class_to_idx=class_to_idx,
+        **classify_kwargs,
     )
     val_dataset = BboxImageNetDataset(
         image_dir=Path(config.imagenet_root) / "val",
@@ -296,6 +336,7 @@ def create_bbox_dataloaders(
         transform=val_transform,
         split="val",
         class_to_idx=class_to_idx,
+        **classify_kwargs,
     )
 
     if config.max_images_per_class is not None:

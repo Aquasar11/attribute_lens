@@ -19,7 +19,6 @@ import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
 
-from .bbox_data import classify_patches
 from .config import PatchMapFullConfig
 from .model import VisionModelWrapper
 from .patch_map import PatchMapBank
@@ -109,35 +108,20 @@ class PatchMapLightningModule(pl.LightningModule):
 
     def _compute_loss(
         self,
-        batch: tuple[torch.Tensor, torch.Tensor, list[list[dict]]],
+        batch: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         stage: str,
     ) -> torch.Tensor | None:
-        images, _labels, bboxes_list = batch
+        images, _labels, fg_mask, bg_mask = batch
+
+        # Masks arrive pre-computed from dataloader workers — no CPU loop here.
+        fg_mask = fg_mask.to(self.device)  # [B, H*W]
+        bg_mask = bg_mask.to(self.device)
 
         cls_dict, patch_dict, _logits = self.model_wrapper.extract_cls_and_patches(images)
 
         B = images.shape[0]
         H, W = self.model_wrapper.patch_grid_size
-        patch_size = 224 // H  # e.g. 14 for ViT-L/14 on 224×224
-
         cfg = self.config.patch_map
-
-        # Classify patches for every image in the batch
-        fg_list = []
-        bg_list = []
-        for bboxes_224 in bboxes_list:
-            fg, bg = classify_patches(
-                bboxes_224,
-                grid_size=H,
-                patch_size=patch_size,
-                fg_threshold=cfg.fg_threshold,
-                bg_threshold=cfg.bg_threshold,
-            )
-            fg_list.append(torch.from_numpy(fg.reshape(-1)))
-            bg_list.append(torch.from_numpy(bg.reshape(-1)))
-
-        fg_mask = torch.stack(fg_list, dim=0).to(self.device)  # [B, H*W]
-        bg_mask = torch.stack(bg_list, dim=0).to(self.device)
 
         has_fg = fg_mask.any().item()
         has_bg = bg_mask.any().item()
@@ -181,15 +165,15 @@ class PatchMapLightningModule(pl.LightningModule):
                     y_norm   = F.normalize(y.float(), p=2, dim=-1)          # [B, H*W, d]
                     cls_norm = F.normalize(cls.float(), p=2, dim=-1)        # [B, d]
                     sims     = (y_norm * cls_norm.unsqueeze(1)).sum(dim=-1) # [B, H*W]
-                fg_sims = sims[fg_mask].float()
-                bg_sims = sims[bg_mask].float()
-                s = self._val_stats[layer_idx]
-                s[0] += fg_sims.numel()
-                s[1] += fg_sims.sum().item()
-                s[2] += (fg_sims ** 2).sum().item()
-                s[3] += bg_sims.numel()
-                s[4] += bg_sims.sum().item()
-                s[5] += (bg_sims ** 2).sum().item()
+                    fg_sims  = sims[fg_mask]
+                    bg_sims  = sims[bg_mask]
+                    s = self._val_stats[layer_idx]
+                    s[0] += fg_sims.numel()
+                    s[1] += fg_sims.sum().item()
+                    s[2] += (fg_sims * fg_sims).sum().item()
+                    s[3] += bg_sims.numel()
+                    s[4] += bg_sims.sum().item()
+                    s[5] += (bg_sims * bg_sims).sum().item()
 
             del cls, y
             total_loss = total_loss + layer_loss
