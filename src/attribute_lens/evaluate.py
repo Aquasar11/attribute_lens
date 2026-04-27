@@ -750,6 +750,10 @@ def main() -> None:
     precision = "fp16" if config.eval.use_fp16 and device == "cuda" else "fp32"
     print(f"  Perturbation precision: {precision}")
 
+    # Extract the frozen classification head from the model for use in scorers.
+    # Lenses now output d_model (embedding space); the head maps d_model → num_classes.
+    model_head = wrapper.model.head
+
     # Build scorers
     cls_scorer: CLSLensScorer | None = None
     patch_scorer: PatchLensScorer | None = None
@@ -762,6 +766,7 @@ def main() -> None:
             means_path=config.lens.means_path,
             target_layers=target_layers,
             device=device,
+            model_head=model_head,
         )
 
     if scorer_type in ("patch", "both", "all"):
@@ -772,6 +777,7 @@ def main() -> None:
             patch_border=config.lens.patch_border,
             target_layers=target_layers,
             device=device,
+            model_head=model_head,
         )
 
     if scorer_type in ("patch_map_cls", "all"):
@@ -781,6 +787,7 @@ def main() -> None:
             patch_map_dir=config.lens.patch_map_dir,
             target_layers=target_layers,
             device=device,
+            model_head=model_head,
         )
 
     # Collect images

@@ -28,14 +28,19 @@ def load_lens_checkpoint(path: str, device: str = "cpu") -> BaseLens:
     """Load a lens from a .pt checkpoint, auto-detecting AffineLens vs MLPLens.
 
     Inspects state_dict keys:
-    - ``linear.weight`` → AffineLens(d_model, num_classes)
-    - ``net.0.weight``  → MLPLens(d_model, num_classes, hidden_dim, num_layers)
+    - ``linear.weight`` → AffineLens(d_model, out_dim)
+    - ``net.0.weight``  → MLPLens(d_model, out_dim, hidden_dim, num_layers)
+
+    For the current tuned-lens architecture, the lens maps d_model → d_model
+    (embedding space) and the frozen classification head is applied separately
+    in the scorer.  The weight shape is therefore [d_model, d_model] (square).
     """
     payload = torch.load(path, map_location="cpu", weights_only=False)
     sd = payload["state_dict"]
 
     if "linear.weight" in sd:
-        # AffineLens: linear.weight shape [num_classes, d_model]
+        # AffineLens: linear.weight shape [out_dim, d_model]
+        # Current architecture: out_dim == d_model (embedding-space lens)
         w = sd["linear.weight"]
         num_classes, d_model = w.shape
         bias = "linear.bias" in sd and sd["linear.bias"] is not None
@@ -120,9 +125,13 @@ class CLSLensScorer:
         means_path: str,
         target_layers: list[int],
         device: str = "cpu",
+        model_head: torch.nn.Module | None = None,
     ) -> None:
         self.device = device
         self.target_layers = target_layers
+        # Frozen classification head applied after the lens (lens outputs d_model,
+        # head maps d_model → num_classes).
+        self.model_head = model_head
 
         # Load lenses
         available = discover_lens_files(cls_lens_dir)
@@ -188,8 +197,10 @@ class CLSLensScorer:
 
             adjusted = flat - mean_tok + mean_cls.unsqueeze(0)  # [H*W, d_model]
 
-            logits = self.lenses[idx](adjusted)            # [H*W, num_classes]
-            scores = F.softmax(logits, dim=-1)[:, y_hat]  # [H*W]
+            out = self.lenses[idx](adjusted)                   # [H*W, d_model or num_classes]
+            if self.model_head is not None:
+                out = self.model_head(out)                     # [H*W, num_classes]
+            scores = F.softmax(out, dim=-1)[:, y_hat]         # [H*W]
             results[idx] = scores.reshape(H, W).cpu()
         return results
 
@@ -223,8 +234,10 @@ class CLSLensScorer:
             mean_cls_b = mean_cls.unsqueeze(0).expand(B * H * W, d)
 
             adjusted = flat - mean_tok_b + mean_cls_b          # [B*H*W, d]
-            logits = self.lenses[idx](adjusted)                 # [B*H*W, num_classes]
-            probs = F.softmax(logits, dim=-1)                   # [B*H*W, num_classes]
+            out = self.lenses[idx](adjusted)                    # [B*H*W, d_model or num_classes]
+            if self.model_head is not None:
+                out = self.model_head(out)                      # [B*H*W, num_classes]
+            probs = F.softmax(out, dim=-1)                      # [B*H*W, num_classes]
 
             y_exp = y_hats_t.repeat_interleave(H * W)          # [B*H*W]
             scores = probs[torch.arange(B * H * W, device=self.device), y_exp]
@@ -266,12 +279,14 @@ class PatchLensScorer:
         patch_border: int,
         target_layers: list[int],
         device: str = "cpu",
+        model_head: torch.nn.Module | None = None,
     ) -> None:
         self.device = device
         self.target_layers = target_layers
         self.k = patch_neighbor_size
         self.half_k = patch_neighbor_size // 2
         self.border = patch_border
+        self.model_head = model_head
 
         # Load lenses
         available = discover_lens_files(patch_lens_dir)
@@ -337,8 +352,10 @@ class PatchLensScorer:
 
             if neighborhoods:
                 nb_tensor = torch.stack(neighborhoods, dim=0)  # [num_valid, k*k*d]
-                logits = self.lenses[idx](nb_tensor)           # [num_valid, num_classes]
-                scores = F.softmax(logits, dim=-1)[:, y_hat]  # [num_valid]
+                out = self.lenses[idx](nb_tensor)               # [num_valid, d_model or num_classes]
+                if self.model_head is not None:
+                    out = self.model_head(out)                  # [num_valid, num_classes]
+                scores = F.softmax(out, dim=-1)[:, y_hat]      # [num_valid]
 
                 for (i, j), s in zip(valid_positions, scores.tolist()):
                     score_map[i, j] = s
@@ -409,9 +426,11 @@ class PatchMapCLSLensScorer:
         patch_map_dir: str,
         target_layers: list[int],
         device: str = "cpu",
+        model_head: torch.nn.Module | None = None,
     ) -> None:
         self.device = device
         self.target_layers = target_layers
+        self.model_head = model_head
 
         # Load CLS lenses
         available_lenses = discover_lens_files(cls_lens_dir)
@@ -457,9 +476,11 @@ class PatchMapCLSLensScorer:
             _, H, W, d = patches.shape
             flat = patches[0].reshape(H * W, d)           # [H*W, d_model]
 
-            mapped = self.patch_maps[idx](flat)            # [H*W, d_model]
-            logits = self.lenses[idx](mapped)              # [H*W, num_classes]
-            scores = F.softmax(logits, dim=-1)[:, y_hat]  # [H*W]
+            mapped = self.patch_maps[idx](flat)                # [H*W, d_model]
+            out = self.lenses[idx](mapped)                     # [H*W, d_model or num_classes]
+            if self.model_head is not None:
+                out = self.model_head(out)                     # [H*W, num_classes]
+            scores = F.softmax(out, dim=-1)[:, y_hat]         # [H*W]
             results[idx] = scores.reshape(H, W).cpu()
         return results
 
@@ -488,8 +509,10 @@ class PatchMapCLSLensScorer:
             flat = patches.reshape(B * H * W, d)               # [B*H*W, d]
 
             mapped = self.patch_maps[idx](flat)                 # [B*H*W, d]
-            logits = self.lenses[idx](mapped)                   # [B*H*W, num_classes]
-            probs = F.softmax(logits, dim=-1)                   # [B*H*W, num_classes]
+            out = self.lenses[idx](mapped)                      # [B*H*W, d_model or num_classes]
+            if self.model_head is not None:
+                out = self.model_head(out)                      # [B*H*W, num_classes]
+            probs = F.softmax(out, dim=-1)                      # [B*H*W, num_classes]
 
             y_exp = y_hats_t.repeat_interleave(H * W)          # [B*H*W]
             scores = probs[torch.arange(B * H * W, device=self.device), y_exp]

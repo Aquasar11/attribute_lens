@@ -257,13 +257,13 @@ class PatchMapLightningModule(pl.LightningModule):
             return {"optimizer": opt, "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"}}
         elif cfg.scheduler == "plateau":
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                opt, mode="min", factor=0.5, patience=2
+                opt, mode="max", factor=0.5, patience=2
             )
             return {
                 "optimizer": opt,
                 "lr_scheduler": {
                     "scheduler": scheduler,
-                    "monitor": "val/loss_avg",
+                    "monitor": "val/layer_weight_avg",
                     "interval": "epoch",
                 },
             }
