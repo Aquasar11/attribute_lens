@@ -4,9 +4,9 @@ model:
   target_layers: null
 
 lens:
-  cls_lens_dir: "/home/dev/attribute_lens/outputs/affine_kld/best_lenses"
+  cls_lens_dir: "/home/dev/attribute_lens/outputs/clip/tuned_lens/best_lenses"
   patch_lens_dir: ""
-  patch_map_dir: "/home/dev/attribute_lens/outputs/patch_map_full/best_maps"
+  patch_map_dir: "/home/dev/attribute_lens/outputs/clip/patch_map_full/best_maps"
   patch_neighbor_size: 3
   patch_border: 2
   means_path: ""
@@ -16,7 +16,7 @@ eval:
   image_paths: []
   num_images: null
   num_save_images: 10
-  output_dir: "/home/dev/attribute_lens/outputs/experiments/nb_score_la_weighted_1"
+  output_dir: "/home/dev/attribute_lens/outputs/clip/experiments/nb_score_la_weighted_1"
   device: "cuda"
   scorer_type: "patch_map_cls"
   blur_kernel_size: 55
@@ -32,7 +32,7 @@ eval:
     enabled: true
     min_layer: 1
     max_layer: 22
-    weights_path: "/home/dev/attribute_lens/tmp/layer_avg_weights_patch_map_full.pt"
+    weights_path: "/home/dev/attribute_lens/outputs/clip/layer_avg_weights_patch_map_full.pt"
 
   neighbor_avg:
     enabled: true

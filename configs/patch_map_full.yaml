@@ -18,8 +18,8 @@ data:
   imagenet_root: "/opt/models/datasets/imagenet/extracted"          # e.g. /opt/models/datasets/imagenet
   bbox_dir_train: "/opt/models/datasets/imagenet/boxes/train"         # e.g. /opt/models/datasets/imagenet/boxes/train
   bbox_dir_val: "/opt/models/datasets/imagenet/boxes/val"           # e.g. /opt/models/datasets/imagenet/boxes/val
-  batch_size: 512
-  num_workers: 20
+  batch_size: 128
+  num_workers: 16
   max_images_per_class: null  # null = use all; set e.g. 50 for quick smoke test
 
 training:
