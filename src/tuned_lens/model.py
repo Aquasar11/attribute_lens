@@ -27,6 +27,8 @@ class VisionModelWrapper:
         self.device = device
         self._hooks: list[RemovableHandle] = []
         self._hidden_states: dict[int, torch.Tensor] = {}
+        self._full_sequence: bool = False
+        self._full_states: dict[int, torch.Tensor] = {}
 
         self._load_model()
 
@@ -101,6 +103,28 @@ class VisionModelWrapper:
                 self._hidden_states[layer_idx] = output[:, 0, :].detach()
         return hook_fn
 
+    def _make_full_seq_hook(self, layer_idx: int) -> Any:
+        def hook_fn(module: nn.Module, input: Any, output: torch.Tensor) -> None:
+            self._full_states[layer_idx] = output.detach()  # [B, 1+H*W, d]
+        return hook_fn
+
+    def enable_full_sequence_mode(self) -> None:
+        """Switch to persistent full-sequence hooks (CLS + all patches in one pass).
+
+        After this call, ``extract_cls_and_patches`` no longer re-registers hooks
+        on every invocation — it simply runs the forward pass and slices the
+        already-captured full-sequence tensors.  This eliminates the per-batch
+        hook teardown / re-install overhead.
+        """
+        self._full_sequence = True
+        self._full_states = {}
+        self._remove_hooks()
+        for layer_idx in self.target_layers:
+            handle = self.model.blocks[layer_idx].register_forward_hook(
+                self._make_full_seq_hook(layer_idx)
+            )
+            self._hooks.append(handle)
+
     def _remove_hooks(self) -> None:
         for handle in self._hooks:
             handle.remove()
@@ -156,8 +180,10 @@ class VisionModelWrapper:
     ) -> tuple[dict[int, torch.Tensor], dict[int, torch.Tensor], torch.Tensor]:
         """Extract CLS tokens and patch grids in a single forward pass.
 
-        Temporarily installs full-sequence hooks (capturing all tokens) regardless
-        of the wrapper's current ``patch_mode`` setting, then restores original hooks.
+        If ``enable_full_sequence_mode()`` has been called, uses the persistent
+        hooks already installed — no per-call hook teardown/reinstall overhead.
+        Otherwise, temporarily installs full-sequence hooks and restores original
+        hooks afterwards (one-off / notebook use).
 
         Args:
             images: Input images [B, C, H, W].
@@ -167,6 +193,21 @@ class VisionModelWrapper:
             patch_dict:    {layer_idx: [B, H, W, d_model]}
             target_logits: Final model output [B, num_classes].
         """
+        H, W = self.patch_grid_size
+
+        if self._full_sequence:
+            # Fast path: persistent hooks already capture full sequences.
+            self._full_states.clear()
+            logits = self.model(images)
+            cls_dict = {k: v[:, 0, :] for k, v in self._full_states.items()}
+            patch_dict = {
+                k: v[:, 1:, :].reshape(v.shape[0], H, W, v.shape[-1])
+                for k, v in self._full_states.items()
+            }
+            self._full_states.clear()
+            return cls_dict, patch_dict, logits
+
+        # Slow path: install temp hooks, run, restore original hooks.
         self._remove_hooks()
         full_states: dict[int, torch.Tensor] = {}
 
@@ -186,7 +227,6 @@ class VisionModelWrapper:
             h.remove()
         self._register_hooks()
 
-        H, W = self.patch_grid_size
         cls_dict = {k: v[:, 0, :] for k, v in full_states.items()}
         patch_dict = {
             k: v[:, 1:, :].reshape(v.shape[0], H, W, v.shape[-1])

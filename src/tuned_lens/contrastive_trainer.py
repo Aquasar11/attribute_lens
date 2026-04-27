@@ -11,6 +11,7 @@ where y = map(patch_token) is the transformed patch embedding.
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Any
 
@@ -87,18 +88,20 @@ class PatchMapLightningModule(pl.LightningModule):
         self.best_val_weight: dict[int, float] = {
             i: -1.0 for i in self.model_wrapper.target_layers
         }
-        # Per-epoch cosine-similarity accumulators, reset each validation epoch
-        self._val_fg_sims: dict[int, list] = {i: [] for i in self.model_wrapper.target_layers}
-        self._val_bg_sims: dict[int, list] = {i: [] for i in self.model_wrapper.target_layers}
+        # Per-epoch running stats for cosine-similarity — O(1) RAM per layer.
+        # Layout: [fg_n, fg_sum, fg_sum_sq, bg_n, bg_sum, bg_sum_sq]
+        self._val_stats: dict[int, list[float]] = {
+            i: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] for i in self.model_wrapper.target_layers
+        }
 
     def setup(self, stage: str | None = None) -> None:
-        """Move the frozen backbone to the training device."""
+        """Move the frozen backbone to the training device and install persistent hooks."""
         self.model_wrapper.to(self.device)
+        self.model_wrapper.enable_full_sequence_mode()
 
     def on_validation_epoch_start(self) -> None:
         for layer_idx in self.model_wrapper.target_layers:
-            self._val_fg_sims[layer_idx] = []
-            self._val_bg_sims[layer_idx] = []
+            self._val_stats[layer_idx] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
     # ------------------------------------------------------------------
     # Loss computation
@@ -144,14 +147,17 @@ class PatchMapLightningModule(pl.LightningModule):
         logged_counts = False
 
         for layer_idx in self.model_wrapper.target_layers:
-            patches = patch_dict[layer_idx].to(self.device)  # [B, H, W, d]
-            cls = cls_dict[layer_idx].to(self.device)         # [B, d]
+            # pop() frees the reference immediately after use
+            patches = patch_dict.pop(layer_idx).to(self.device)  # [B, H, W, d]
+            cls = cls_dict.pop(layer_idx).to(self.device)         # [B, d]
 
             # Flatten spatial dims: [B, H*W, d]
             y = self.map_bank(layer_idx, patches.reshape(B, H * W, -1))
+            del patches
 
             if not (has_fg and has_bg):
                 # Contrastive loss requires both classes; skip this batch
+                del cls, y
                 continue
 
             layer_loss = contrastive_patch_loss(
@@ -168,15 +174,24 @@ class PatchMapLightningModule(pl.LightningModule):
                 self.log("train/bg_patches", float(bg_mask.sum()), on_step=True, on_epoch=False)
                 logged_counts = True
 
-            # Accumulate cosine similarities for val-epoch layer weight computation
+            # Accumulate running stats for val-epoch layer weight computation.
+            # Layout: [fg_n, fg_sum, fg_sum_sq, bg_n, bg_sum, bg_sum_sq]
             if stage == "val":
                 with torch.no_grad():
                     y_norm   = F.normalize(y.float(), p=2, dim=-1)          # [B, H*W, d]
                     cls_norm = F.normalize(cls.float(), p=2, dim=-1)        # [B, d]
                     sims     = (y_norm * cls_norm.unsqueeze(1)).sum(dim=-1) # [B, H*W]
-                self._val_fg_sims[layer_idx].extend(sims[fg_mask].cpu().tolist())
-                self._val_bg_sims[layer_idx].extend(sims[bg_mask].cpu().tolist())
+                fg_sims = sims[fg_mask].float()
+                bg_sims = sims[bg_mask].float()
+                s = self._val_stats[layer_idx]
+                s[0] += fg_sims.numel()
+                s[1] += fg_sims.sum().item()
+                s[2] += (fg_sims ** 2).sum().item()
+                s[3] += bg_sims.numel()
+                s[4] += bg_sims.sum().item()
+                s[5] += (bg_sims ** 2).sum().item()
 
+            del cls, y
             total_loss = total_loss + layer_loss
             n_layers += 1
 
@@ -202,14 +217,19 @@ class PatchMapLightningModule(pl.LightningModule):
         layer_weights = []
 
         for layer_idx in self.model_wrapper.target_layers:
-            fg_vals = self._val_fg_sims[layer_idx]
-            bg_vals = self._val_bg_sims[layer_idx]
-            if not fg_vals or not bg_vals:
+            s = self._val_stats[layer_idx]
+            fg_n, fg_sum, fg_sum_sq = s[0], s[1], s[2]
+            bg_n, bg_sum, bg_sum_sq = s[3], s[4], s[5]
+
+            if fg_n < 1 or bg_n < 1:
                 continue
 
-            fg = torch.tensor(fg_vals)
-            bg = torch.tensor(bg_vals)
-            w = float(max(fg.mean() - bg.mean(), 0.0) / (fg.std() + bg.std() + _EPS))
+            fg_mean = fg_sum / fg_n
+            fg_std  = math.sqrt(max(fg_sum_sq / fg_n - fg_mean ** 2, 0.0))
+            bg_mean = bg_sum / bg_n
+            bg_std  = math.sqrt(max(bg_sum_sq / bg_n - bg_mean ** 2, 0.0))
+
+            w = float(max(fg_mean - bg_mean, 0.0) / (fg_std + bg_std + _EPS))
             layer_weights.append(w)
 
             self.log(f"val/layer_weight_{layer_idx}", w, on_epoch=True)
