@@ -2,7 +2,7 @@ model:
   model_name: "vit_large_patch14_dinov2.lvd142m"
   pretrained: true
   weights_path: null        # Optional: path to local .safetensors or .pt weights
-  head_weights_path: "dinov2_large_imagenet1k_head.pt"  # from download_dinov2_head.py
+  head_weights_path: "outputs/vit_large_patch14_dinov2/dinov2_large_imagenet1k_head.pt"  # from download_dinov2_head.py
   target_layers: null       # null = all layers; or a list like [0, 6, 12, 18, 23]
   freeze_model: true
   patch_mode: false         # set to true automatically when use_patch_tokens=true
@@ -21,7 +21,7 @@ lens:
 
 data:
   imagenet_root: "/opt/models/datasets/imagenet/extracted"         # Path to extracted ImageNet (with train/ and val/ subdirs)
-  batch_size: 512
+  batch_size: 128
   num_workers: 16
   image_size: 224
   max_images_per_class: 500  # null = use all ~1300 images per class; set e.g. 500 to limit
