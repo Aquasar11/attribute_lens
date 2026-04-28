@@ -93,7 +93,7 @@ pip install transformers
 python -m tuned_lens.scripts.download_dinov2_head --output dinov2_large_imagenet1k_head.pt
 ```
 
-This saves `{'weight': [1000, 1024], 'bias': [1000]}` to `dinov2_large_imagenet1k_head.pt`. The `configs/default_dinov2_l14.yaml` config points to this file via `model.head_weights_path`.
+This saves `{'weight': [1000, 2048], 'bias': [1000]}` to `dinov2_large_imagenet1k_head.pt`. The head has 2048 input features because `facebook/dinov2-large-imagenet1k-1-layer` uses `concat([CLS, patch_avg])` features (2 × d_model = 2048). `VisionModelWrapper` handles this automatically: when training lenses (which output `d_model=1024`), `apply_head` uses only the CLS-column slice of the weight matrix; when computing target logits, the full concat is used. The `configs/default_dinov2_l14.yaml` config points to this file via `model.head_weights_path`.
 
 ---
 
@@ -133,14 +133,14 @@ boxes/
 
 Trains one lightweight probe per ViT layer (CLS-token mode). The backbone is frozen.
 
-**Training objective:** KL divergence between the probe output and the frozen model's final softmax.
+**Training objective:** KL divergence between lens logits and the frozen model's final softmax. Each lens outputs a predicted final-layer embedding (`d_model`-dim); the frozen classification head (`apply_head`) is applied after the lens to produce logits before the loss is computed.
 
 ### Lens types
 
 | Type | Description | Config |
 |---|---|---|
-| `affine` | Single linear layer `d_model → num_classes` | `configs/affine_kld.yaml` |
-| `mlp` | Multi-layer MLP with GELU | `configs/mlp_kld.yaml` |
+| `affine` | Single linear layer `d_model → d_model` (embedding space) | `configs/affine_kld.yaml` |
+| `mlp` | Multi-layer MLP with GELU, `d_model → d_model` | `configs/mlp_kld.yaml` |
 | `affine` + CE loss | Affine with cross-entropy target | `configs/affine_ce.yaml` |
 | `affine` + combined | KLD + CE weighted | `configs/affine_combined.yaml` |
 

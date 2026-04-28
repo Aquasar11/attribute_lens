@@ -182,22 +182,25 @@ python -m attribute_lens.evaluate \
 For each patch at position **p** and layer **L**:
 
 ```
-adjusted[p] = h[p] - mean_token[L][p] + mean_cls[L]
-score[p]    = softmax(cls_lens_L(adjusted[p]))[ŷ]
+adjusted[p]  = h[p] - mean_token[L][p] + mean_cls[L]
+embedding[p] = cls_lens_L(adjusted[p])      # [d_model] — lens output
+score[p]     = softmax(head(embedding[p]))[ŷ]
 ```
 
 where `h[p]` is the patch token embedding, `mean_token[L][p]` is the mean
 embedding of that patch position over the val set, and `mean_cls[L]` is the
 mean CLS token embedding. This shifts the patch token into the CLS distribution
-before querying the CLS-trained lens.
+before querying the CLS-trained lens. The frozen classification head (`apply_head`)
+converts the lens embedding to class logits before softmax.
 
 ### Patch Lens Scorer
 
 For each valid center patch **(i, j)** and layer **L**:
 
 ```
-neighborhood = concat(patch tokens in k×k grid around (i,j))  # [k²·d]
-score[i,j]   = softmax(patch_lens_L(neighborhood))[ŷ]
+neighborhood = concat(patch tokens in k×k grid around (i,j))  # [k²·d_model]
+embedding    = patch_lens_L(neighborhood)                       # [d_model]
+score[i,j]   = softmax(head(embedding))[ŷ]
 ```
 
 Patches within `patch_border` steps of the image edge receive `NaN` and are

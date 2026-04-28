@@ -197,7 +197,7 @@ class CLSLensScorer:
 
             adjusted = flat - mean_tok + mean_cls.unsqueeze(0)  # [H*W, d_model]
 
-            out = self.lenses[idx](adjusted)                   # [H*W, d_model or num_classes]
+            out = self.lenses[idx](adjusted)                   # [H*W, d_model]
             if self.model_head is not None:
                 out = self.model_head(out)                     # [H*W, num_classes]
             scores = F.softmax(out, dim=-1)[:, y_hat]         # [H*W]
@@ -234,7 +234,7 @@ class CLSLensScorer:
             mean_cls_b = mean_cls.unsqueeze(0).expand(B * H * W, d)
 
             adjusted = flat - mean_tok_b + mean_cls_b          # [B*H*W, d]
-            out = self.lenses[idx](adjusted)                    # [B*H*W, d_model or num_classes]
+            out = self.lenses[idx](adjusted)                    # [B*H*W, d_model]
             if self.model_head is not None:
                 out = self.model_head(out)                      # [B*H*W, num_classes]
             probs = F.softmax(out, dim=-1)                      # [B*H*W, num_classes]
@@ -352,7 +352,7 @@ class PatchLensScorer:
 
             if neighborhoods:
                 nb_tensor = torch.stack(neighborhoods, dim=0)  # [num_valid, k*k*d]
-                out = self.lenses[idx](nb_tensor)               # [num_valid, d_model or num_classes]
+                out = self.lenses[idx](nb_tensor)               # [num_valid, d_model]
                 if self.model_head is not None:
                     out = self.model_head(out)                  # [num_valid, num_classes]
                 scores = F.softmax(out, dim=-1)[:, y_hat]      # [num_valid]
@@ -477,7 +477,7 @@ class PatchMapCLSLensScorer:
             flat = patches[0].reshape(H * W, d)           # [H*W, d_model]
 
             mapped = self.patch_maps[idx](flat)                # [H*W, d_model]
-            out = self.lenses[idx](mapped)                     # [H*W, d_model or num_classes]
+            out = self.lenses[idx](mapped)                     # [H*W, d_model]
             if self.model_head is not None:
                 out = self.model_head(out)                     # [H*W, num_classes]
             scores = F.softmax(out, dim=-1)[:, y_hat]         # [H*W]
@@ -509,7 +509,7 @@ class PatchMapCLSLensScorer:
             flat = patches.reshape(B * H * W, d)               # [B*H*W, d]
 
             mapped = self.patch_maps[idx](flat)                 # [B*H*W, d]
-            out = self.lenses[idx](mapped)                      # [B*H*W, d_model or num_classes]
+            out = self.lenses[idx](mapped)                      # [B*H*W, d_model]
             if self.model_head is not None:
                 out = self.model_head(out)                      # [B*H*W, num_classes]
             probs = F.softmax(out, dim=-1)                      # [B*H*W, num_classes]

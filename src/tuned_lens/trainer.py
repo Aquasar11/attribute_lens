@@ -103,8 +103,8 @@ class TunedLensLightningModule(pl.LightningModule):
 
         for layer_idx in target_layers:
             cls_token = hidden_states[layer_idx].to(self.device)
-            lens_embedding = self.lens_bank(layer_idx, cls_token)      # [B, d_model]
-            lens_logits = self.model_wrapper.model.head(lens_embedding) # [B, num_classes]
+            lens_embedding = self.lens_bank(layer_idx, cls_token)           # [B, d_model]
+            lens_logits = self.model_wrapper.apply_head(lens_embedding)    # [B, num_classes]
 
             layer_loss = self.loss_fn(lens_logits, target_logits.detach(), gt_labels)
 
@@ -166,8 +166,8 @@ class TunedLensLightningModule(pl.LightningModule):
             # [num_valid*B, k*k*d_model]
             nb_tensor = torch.stack(neighborhoods, dim=0).view(num_valid * B, k * k * d_model)
 
-            lens_embedding = self.lens_bank(layer_idx, nb_tensor)           # [num_valid*B, d_model]
-            lens_logits = self.model_wrapper.model.head(lens_embedding)     # [num_valid*B, num_classes]
+            lens_embedding = self.lens_bank(layer_idx, nb_tensor)               # [num_valid*B, d_model]
+            lens_logits = self.model_wrapper.apply_head(lens_embedding)        # [num_valid*B, num_classes]
 
             # Replicate targets and labels for each patch
             target_rep = target_logits.unsqueeze(0).expand(num_valid, -1, -1).reshape(num_valid * B, -1)

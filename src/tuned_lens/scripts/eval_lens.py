@@ -83,7 +83,8 @@ def evaluate(
 
         for layer_idx in layer_indices:
             cls_token = hidden_states[layer_idx].to(device)
-            lens_logits = lenses[layer_idx](cls_token)
+            lens_embedding = lenses[layer_idx](cls_token)            # [B, d_model]
+            lens_logits = wrapper.apply_head(lens_embedding)         # [B, num_classes]
             lens_preds = lens_logits.argmax(dim=-1)  # [B]
             correct[layer_idx] += (lens_preds == model_preds).sum().item()
 

@@ -750,9 +750,9 @@ def main() -> None:
     precision = "fp16" if config.eval.use_fp16 and device == "cuda" else "fp32"
     print(f"  Perturbation precision: {precision}")
 
-    # Extract the frozen classification head from the model for use in scorers.
-    # Lenses now output d_model (embedding space); the head maps d_model → num_classes.
-    model_head = wrapper.model.head
+    # Use apply_head so scorers work with standard heads and DINOv2-style
+    # CLS+patch_avg heads (which become nn.Identity when _custom_head is set).
+    model_head = wrapper.apply_head
 
     # Build scorers
     cls_scorer: CLSLensScorer | None = None

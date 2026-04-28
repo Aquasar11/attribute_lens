@@ -1,4 +1,4 @@
-"""Lens architectures: learnable probes that map hidden states to label logits."""
+"""Lens architectures: learnable probes that map hidden states to embedding space."""
 
 from __future__ import annotations
 
@@ -15,7 +15,10 @@ from .config import LensConfig
 class BaseLens(nn.Module, ABC):
     """Abstract base class for all lens types.
 
-    A lens maps a hidden state vector [B, d_model] to logits [B, num_classes].
+    A lens maps an intermediate CLS token [B, d_model] to a predicted
+    final-layer embedding [B, d_model].  The frozen classification head
+    (``VisionModelWrapper.apply_head``) is applied separately by the trainer
+    and scorers to convert that embedding to class logits [B, num_classes].
     """
 
     @abstractmethod
@@ -38,7 +41,7 @@ class BaseLens(nn.Module, ABC):
 
 
 class AffineLens(BaseLens):
-    """Single affine transformation: d_model -> num_classes."""
+    """Single affine transformation: d_model -> d_model (embedding space)."""
 
     def __init__(self, d_model: int, num_classes: int, bias: bool = True) -> None:
         super().__init__()
