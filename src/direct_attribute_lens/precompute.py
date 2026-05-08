@@ -19,15 +19,20 @@ Each .pt file contains:
 
 from __future__ import annotations
 
+import copy
 import os
 from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from PIL import ImageFile
+from torch import Tensor
 from torch.utils.data import DataLoader, Subset
 from torchvision.datasets import ImageFolder
+from tqdm import tqdm
 
 # Re-use the existing model code unchanged.
 from tuned_lens.model import VisionModelWrapper
@@ -37,6 +42,52 @@ if TYPE_CHECKING:
     from .config import DirectLensConfig
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+
+# ── Standalone head (kept on GPU after backbone is offloaded) ─────────────────
+
+class _NormLinearHead(nn.Module):
+    """fc_norm + head copied from a standard timm ViT. Frozen."""
+
+    def __init__(self, fc_norm: nn.Module, head: nn.Module) -> None:
+        super().__init__()
+        self.fc_norm = copy.deepcopy(fc_norm)
+        self.head = copy.deepcopy(head)
+        for p in self.parameters():
+            p.requires_grad = False
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.head(self.fc_norm(x))
+
+
+class _LinearHead(nn.Module):
+    """Custom linear head (e.g. DINOv2): just W @ x + b. Frozen."""
+
+    def __init__(self, weight: Tensor, bias: Tensor | None) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(weight.clone().detach(), requires_grad=False)
+        self.bias = (nn.Parameter(bias.clone().detach(), requires_grad=False)
+                     if bias is not None else None)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return F.linear(x, self.weight, self.bias)
+
+
+def make_standalone_head(model_wrapper: VisionModelWrapper) -> nn.Module:
+    """Extract just the classification head as a standalone frozen module.
+
+    After pre-computation the full backbone can be offloaded to CPU while this
+    tiny module (<2 MB) stays on GPU to provide apply_head for the embedding lens.
+
+    For standard timm ViT:  copies model.fc_norm + model.head
+    For custom-head models: copies the custom linear head (CLS-only portion)
+    """
+    if model_wrapper._custom_head is not None:
+        d = model_wrapper.d_model
+        w = model_wrapper._custom_head.weight[:, :d]
+        b = model_wrapper._custom_head.bias
+        return _LinearHead(w, b)
+    return _NormLinearHead(model_wrapper.model.fc_norm, model_wrapper.model.head)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -125,8 +176,10 @@ def precompute_train(
         # Use the same deterministic ordering (no shuffle) so we resume correctly.
         dataset = Subset(dataset, list(range(skip_images, total_images)))
 
+    n_remaining = len(dataset)
+    n_batches = (n_remaining + config.precompute.precompute_batch_size - 1) // config.precompute.precompute_batch_size
     print(
-        f"Pre-computing training embeddings: {len(dataset)} images remaining "
+        f"Pre-computing training embeddings: {n_remaining} images remaining "
         f"(layer {target_layer}, chunk_size={config.precompute.chunk_size})."
     )
 
@@ -148,35 +201,39 @@ def precompute_train(
     image_ids_parts: list[torch.Tensor] = []
     n_in_chunk = 0
 
-    for batch_images, _ in loader:
-        batch_images = batch_images.to(device)
+    with tqdm(total=n_batches, desc="Pre-compute train", unit="batch") as pbar:
+        for batch_images, _ in loader:
+            batch_images = batch_images.to(device)
 
-        # fp16 inference — autocast speeds up the backbone forward pass ~2×
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
-            _, patch_states, final_logits = model_wrapper.extract_cls_and_patches(batch_images)
+            # fp16 inference — autocast speeds up the backbone forward pass ~2×
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                _, patch_states, final_logits = model_wrapper.extract_cls_and_patches(batch_images)
 
-        # patch_states[target_layer]: [B, H, W, d_model]
-        patch_batch = patch_states[target_layer]
-        B, H, W, d_model = patch_batch.shape
-        N_patches = H * W
+            # patch_states[target_layer]: [B, H, W, d_model]
+            patch_batch = patch_states[target_layer]
+            B, H, W, d_model = patch_batch.shape
+            N_patches = H * W
 
-        # For each image in this batch, all N_patches tokens share the same image-level target.
-        # image_ids maps every token to its image's local index within the current chunk.
-        local_image_ids = torch.arange(B) + n_in_chunk        # [B]
-        token_image_ids = local_image_ids.repeat_interleave(N_patches)  # [B * N_patches]
+            # For each image, all N_patches tokens share the same image-level target.
+            # image_ids maps every token to its image's local index within the current chunk.
+            local_image_ids = torch.arange(B) + n_in_chunk        # [B]
+            token_image_ids = local_image_ids.repeat_interleave(N_patches)  # [B * N_patches]
 
-        patch_embs_parts.append(patch_batch.reshape(B * N_patches, d_model).cpu().half())
-        img_targets_parts.append(final_logits.cpu().half())
-        image_ids_parts.append(token_image_ids)
-        n_in_chunk += B
+            patch_embs_parts.append(patch_batch.reshape(B * N_patches, d_model).cpu().half())
+            img_targets_parts.append(final_logits.cpu().half())
+            image_ids_parts.append(token_image_ids)
+            n_in_chunk += B
 
-        if n_in_chunk >= config.precompute.chunk_size:
-            chunk_path = cache_dir / f"train_chunk_{chunk_idx:04d}.pt"
-            _save_chunk(patch_embs_parts, img_targets_parts, image_ids_parts, chunk_path)
-            chunk_paths.append(chunk_path)
-            patch_embs_parts, img_targets_parts, image_ids_parts = [], [], []
-            n_in_chunk = 0
-            chunk_idx += 1
+            if n_in_chunk >= config.precompute.chunk_size:
+                chunk_path = cache_dir / f"train_chunk_{chunk_idx:04d}.pt"
+                _save_chunk(patch_embs_parts, img_targets_parts, image_ids_parts, chunk_path)
+                chunk_paths.append(chunk_path)
+                patch_embs_parts, img_targets_parts, image_ids_parts = [], [], []
+                n_in_chunk = 0
+                chunk_idx += 1
+
+            pbar.update(1)
+            pbar.set_postfix(chunk=chunk_idx, images_in_chunk=n_in_chunk)
 
     # Save the last (possibly partial) chunk
     if patch_embs_parts:
@@ -216,8 +273,10 @@ def precompute_val(
     full_val = ImageFolder(val_dir, transform=model_wrapper.get_transform())
     val_dataset = _subsample_balanced(full_val, config.precompute.val_max_images_per_class)
 
+    n_val = len(val_dataset)
+    n_batches = (n_val + config.precompute.precompute_batch_size - 1) // config.precompute.precompute_batch_size
     print(
-        f"Pre-computing val embeddings: {len(val_dataset)} images "
+        f"Pre-computing val embeddings: {n_val} images "
         f"(layer {target_layer}, {config.precompute.val_max_images_per_class}/class)."
     )
 
@@ -235,23 +294,26 @@ def precompute_val(
     image_ids_parts: list[torch.Tensor] = []
     n_processed = 0
 
-    for batch_images, _ in loader:
-        batch_images = batch_images.to(device)
+    with tqdm(total=n_batches, desc="Pre-compute val", unit="batch") as pbar:
+        for batch_images, _ in loader:
+            batch_images = batch_images.to(device)
 
-        with torch.autocast(device_type="cuda", dtype=torch.float16):
-            _, patch_states, final_logits = model_wrapper.extract_cls_and_patches(batch_images)
+            with torch.autocast(device_type="cuda", dtype=torch.float16):
+                _, patch_states, final_logits = model_wrapper.extract_cls_and_patches(batch_images)
 
-        patch_batch = patch_states[target_layer]
-        B, H, W, d_model = patch_batch.shape
-        N_patches = H * W
+            patch_batch = patch_states[target_layer]
+            B, H, W, d_model = patch_batch.shape
+            N_patches = H * W
 
-        local_image_ids = torch.arange(B) + n_processed
-        token_image_ids = local_image_ids.repeat_interleave(N_patches)
+            local_image_ids = torch.arange(B) + n_processed
+            token_image_ids = local_image_ids.repeat_interleave(N_patches)
 
-        patch_embs_parts.append(patch_batch.reshape(B * N_patches, d_model).cpu().half())
-        img_targets_parts.append(final_logits.cpu().half())
-        image_ids_parts.append(token_image_ids)
-        n_processed += B
+            patch_embs_parts.append(patch_batch.reshape(B * N_patches, d_model).cpu().half())
+            img_targets_parts.append(final_logits.cpu().half())
+            image_ids_parts.append(token_image_ids)
+            n_processed += B
+
+            pbar.update(1)
 
     patch_embs = torch.cat(patch_embs_parts, dim=0)
     img_targets = torch.cat(img_targets_parts, dim=0)

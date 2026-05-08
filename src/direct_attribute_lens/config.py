@@ -72,7 +72,7 @@ class LensConfig:
 
 @dataclass
 class TrainingConfig:
-    lens_batch_size: int = 8192    # tokens per gradient step (GPU linear op, can be very large)
+    lens_batch_size: int = 16384   # tokens per gradient step (GPU linear op, can be very large)
     num_epochs: int = 50
     lr: float = 1e-3
     weight_decay: float = 0.0
@@ -82,6 +82,11 @@ class TrainingConfig:
     temperature: float = 1.0       # softmax temperature for KLD
     grad_clip_norm: float = 1.0    # 0 to disable
     val_interval: int = 5          # validate every N epochs
+    # ReduceLROnPlateau scheduler — monitors training loss, reduces when it stops improving
+    scheduler: str = "plateau"     # "plateau" | "none"
+    scheduler_patience: int = 3    # epochs with no improvement before reducing LR
+    scheduler_factor: float = 0.5  # multiplicative factor for LR reduction
+    scheduler_min_lr: float = 1e-7 # floor for LR
 
 
 @dataclass

@@ -20,7 +20,7 @@ lens:
   bias: true
 
 training:
-  lens_batch_size: 8192     # tokens per gradient step; try 16384 if VRAM allows
+  lens_batch_size: 32768    # tokens per gradient step
   num_epochs: 50
   lr: 1.0e-3
   weight_decay: 0.0
@@ -30,6 +30,10 @@ training:
   temperature: 1.0
   grad_clip_norm: 1.0
   val_interval: 5           # validate every N epochs
+  scheduler: "plateau"      # "plateau" | "none"
+  scheduler_patience: 3     # epochs with no train-loss improvement before reducing LR
+  scheduler_factor: 0.5     # multiply LR by this on each reduction
+  scheduler_min_lr: 1.0e-7  # LR floor
 
 output_dir: "outputs/direct_lens/layer22"
 seed: 42
