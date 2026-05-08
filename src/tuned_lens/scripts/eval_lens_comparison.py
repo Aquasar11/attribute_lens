@@ -102,7 +102,7 @@ def apply_logit_lens(wrapper: VisionModelWrapper, cls_tokens: torch.Tensor) -> t
     fc_norm = getattr(model, "fc_norm", None)
     if fc_norm is not None:
         x = fc_norm(x)
-    return model.head(x)
+    return wrapper.apply_head(x)
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +145,8 @@ def evaluate(
             cls_token = hidden_states[layer_idx].to(device)
 
             # --- Tuned lens ---
-            tuned_logits = lenses[layer_idx](cls_token)
+            tuned_embedding = lenses[layer_idx](cls_token)          # [B, d_model]
+            tuned_logits = wrapper.apply_head(tuned_embedding)      # [B, num_classes]
             tuned_preds = tuned_logits.argmax(dim=-1)
 
             # --- Logit lens ---

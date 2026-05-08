@@ -183,13 +183,14 @@ python -m tuned_lens.scripts.train --config configs/my_run.yaml \
   --output-dir outputs/combined_loss_run
 ```
 
-### Initialize lenses from the model's classification head
+### Initialize lenses from a pretrained checkpoint
 
 ```bash
 python -m tuned_lens.scripts.train --config configs/my_run.yaml \
-  --init-from-head \
-  --output-dir outputs/head_init_run
+  --output-dir outputs/finetuned_run
 ```
+
+Set `lens.init_from_pretrained` in your config (or use `init_mode: identity` for the default identity initialization).
 
 ### Patch lens training
 
@@ -318,7 +319,7 @@ All parameters in `configs/default.yaml`:
 | | `bias` | `true` | Include bias in linear layers |
 | | `mlp_hidden_dim` | `null` | MLP hidden dim; `null` defaults to `d_model` |
 | | `mlp_num_layers` | `2` | Number of MLP layers |
-| | `init_from_head` | `false` | Initialize lens from model's classification head |
+| | `init_mode` | `identity` | `"identity"` — init affine lens as identity map; `"random"` — random init |
 | | `init_from_pretrained` | `null` | Path to saved lens weights for initialization |
 | | `dropout` | `0.0` | Dropout rate (MLP only) |
 | | `use_patch_tokens` | `false` | Train on patch token neighborhoods instead of CLS token |

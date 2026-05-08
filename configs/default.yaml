@@ -11,7 +11,7 @@ lens:
   bias: true
   mlp_hidden_dim: null      # Only used when lens_type=mlp; null defaults to d_model
   mlp_num_layers: 2         # Only used when lens_type=mlp
-  init_from_head: false     # Initialize lens weights from the model's classification head
+  init_mode: identity       # "identity" (default) | "random"
   init_from_pretrained: null # Path to a saved lens dir/file for initialization
   dropout: 0.0
   use_patch_tokens: false   # true = train on patch neighborhoods instead of CLS token
@@ -19,11 +19,11 @@ lens:
   patch_border: 2           # exclude patches within this many steps of the image edge
 
 data:
-  imagenet_root: ""         # Path to extracted ImageNet (with train/ and val/ subdirs)
-  batch_size: 64
-  num_workers: 4
+  imagenet_root: "/opt/models/datasets/imagenet/extracted"
+  batch_size: 512
+  num_workers: 16
   image_size: 224
-  max_images_per_class: null  # null = use all ~1300 images per class; set e.g. 500 to limit
+  max_images_per_class: 500
 
 training:
   lr: 1.0e-3
@@ -31,7 +31,7 @@ training:
   optimizer: "adam"          # "adam" | "adamw" | "sgd" | "rmsprop" | "nadam"
   scheduler: "cosine"       # "cosine" | "cosine_warmup" | "step" | "exponential" | "linear" | "plateau" | "none"
   warmup_steps: 100
-  max_epochs: 10
+  max_epochs: 50
   gradient_accumulation_steps: 1
   val_check_interval: 1.0    # 1.0 = once per epoch; integer N = every N steps
   loss_type: "kld"           # "kld" | "ce" | "combined"
@@ -50,5 +50,5 @@ sweep:
   weight_decay_range: [1.0e-6, 1.0e-2]
   temperature_range: [0.5, 2.0]
 
-output_dir: "outputs/tuned_lens"
+output_dir: "outputs/clip/tuned_lens"
 seed: 42
