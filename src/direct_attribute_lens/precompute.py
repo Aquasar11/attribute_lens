@@ -152,7 +152,7 @@ def precompute_train(
     Existing chunk files are skipped so the run is safe to resume after interruption.
     Returns a sorted list of all chunk file paths (existing + newly written).
     """
-    cache_dir = Path(config.precompute.cache_dir)
+    cache_dir = Path(config.precompute.cache_dir) / str(config.seed)
     cache_dir.mkdir(parents=True, exist_ok=True)
     target_layer = config.model.target_layer
 
@@ -161,7 +161,7 @@ def precompute_train(
     n_existing = len(existing_chunks)
     skip_images = n_existing * config.precompute.chunk_size
 
-    # Build balanced training dataset (deterministic, no shuffle)
+    # Build balanced training dataset (deterministic, sorted by class)
     train_dir = os.path.join(config.precompute.imagenet_root, "train")
     full_dataset = ImageFolder(train_dir, transform=model_wrapper.get_transform())
     dataset = _subsample_balanced(full_dataset, config.precompute.max_images_per_class)
@@ -171,11 +171,18 @@ def precompute_train(
         print(f"All {n_existing} training chunk(s) already on disk — skipping pre-computation.")
         return existing_chunks
 
+    # Deterministic shuffle so each chunk gets a mix of all classes.
+    # torch.randperm with a fixed generator is reproducible: same seed → same permutation,
+    # so resume (slice shuffled[skip_images:]) lands on exactly the right images.
+    g = torch.Generator()
+    g.manual_seed(config.seed)
+    shuffled = torch.randperm(total_images, generator=g).tolist()
+
     if n_existing > 0:
         print(f"Resuming from chunk {n_existing}: skipping the first {skip_images} images.")
-        # Use the same deterministic ordering (no shuffle) so we resume correctly.
-        dataset = Subset(dataset, list(range(skip_images, total_images)))
+        shuffled = shuffled[skip_images:]
 
+    dataset = Subset(dataset, shuffled)
     n_remaining = len(dataset)
     n_batches = (n_remaining + config.precompute.precompute_batch_size - 1) // config.precompute.precompute_batch_size
     print(
@@ -255,7 +262,7 @@ def precompute_val(
     Saves to ``cache_dir/val.pt`` and loads from there on subsequent calls.
     Returns (patch_embs, img_targets, image_ids) already on ``device``.
     """
-    cache_dir = Path(config.precompute.cache_dir)
+    cache_dir = Path(config.precompute.cache_dir) / str(config.seed)
     cache_dir.mkdir(parents=True, exist_ok=True)
     val_cache = cache_dir / "val.pt"
 
