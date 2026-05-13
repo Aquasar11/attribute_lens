@@ -82,7 +82,7 @@ class TrainingConfig:
     best_fraction: float = 0.2     # fraction of lowest-loss samples used by best_ce loss
     temperature: float = 1.0       # softmax temperature for KLD
     grad_clip_norm: float = 1.0    # 0 to disable
-    val_interval: int = 5          # validate every N epochs
+    val_interval: float = 5.0      # validate every N epochs (>=1) or N times per epoch (<1, e.g. 0.5)
     # ReduceLROnPlateau scheduler — monitors training loss, reduces when it stops improving
     scheduler: str = "plateau"     # "plateau" | "none"
     scheduler_patience: int = 3    # epochs with no improvement before reducing LR

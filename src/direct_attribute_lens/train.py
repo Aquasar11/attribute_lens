@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import random
 from pathlib import Path
 from typing import Callable
@@ -232,18 +233,52 @@ def main() -> None:
     rng = torch.Generator()
     rng.manual_seed(config.seed)
 
+    # Precompute intra-epoch validation checkpoints (chunk indices) for fractional val_interval.
+    n_chunks = len(chunk_paths)
+    val_interval = config.training.val_interval
+    if val_interval < 1.0:
+        n_ckpts = max(1, round(1.0 / val_interval))
+        intra_epoch_val_indices: set[int] | None = {
+            min(math.ceil(n_chunks * k / n_ckpts), n_chunks) - 1
+            for k in range(1, n_ckpts + 1)
+        }
+    else:
+        intra_epoch_val_indices = None
+
+    def _run_validation(avg_train_so_far: float, label: str) -> None:
+        nonlocal best_val_loss
+        current_lr = optimizer.param_groups[0]["lr"]
+        val_loss = validate(
+            lens=lens,
+            apply_head_fn=apply_head_fn,
+            val_patch_embs=val_patch_embs,
+            val_img_targets=val_img_targets,
+            val_image_ids=val_image_ids,
+            loss_fn=loss_fn,
+            lens_batch_size=config.training.lens_batch_size,
+        )
+        is_best = val_loss < best_val_loss
+        if is_best:
+            best_val_loss = val_loss
+            lens.save(output_dir / "best_lens.pt")  # type: ignore[union-attr]
+        marker = " *" if is_best else ""
+        epoch_bar.write(
+            f"{label}  train={avg_train_so_far:.4f}  val={val_loss:.4f}  "
+            f"lr={current_lr:.2e}{marker}"
+        )
+
     # ── Phase 2: Training ─────────────────────────────────────────────────────
     print("\n=== Phase 2: Training ===")
     epoch_bar = tqdm(range(1, config.training.num_epochs + 1), desc="Epochs", unit="epoch")
 
     for epoch in epoch_bar:
         # Shuffle chunk order each epoch so the lens sees data in different sequence.
-        chunk_order = torch.randperm(len(chunk_paths), generator=rng).tolist()
+        chunk_order = torch.randperm(n_chunks, generator=rng).tolist()
 
         epoch_losses: list[float] = []
         chunk_bar = tqdm(chunk_order, desc=f"Epoch {epoch:3d} chunks", unit="chunk", leave=False)
 
-        for ci in chunk_bar:
+        for chunk_idx, ci in enumerate(chunk_bar):
             chunk_path = chunk_paths[ci]
             # Load chunk from disk → GPU. Each chunk is ~26 GB for 50K images in float16.
             data = torch.load(chunk_path, map_location=device, weights_only=True)
@@ -266,6 +301,12 @@ def main() -> None:
             del data
             torch.cuda.empty_cache()
 
+            # Intra-epoch validation at fractional checkpoints.
+            if intra_epoch_val_indices is not None and chunk_idx in intra_epoch_val_indices:
+                pct = round((chunk_idx + 1) / n_chunks * 100)
+                label = f"Epoch {epoch:4d} [{pct:3d}%]/{config.training.num_epochs}"
+                _run_validation(sum(epoch_losses) / len(epoch_losses), label)
+
         avg_train_loss = sum(epoch_losses) / len(epoch_losses)
 
         # Step scheduler on training loss — reduces LR when train loss stops falling.
@@ -273,32 +314,17 @@ def main() -> None:
             scheduler.step(avg_train_loss)
         current_lr = optimizer.param_groups[0]["lr"]
 
-        do_val = (epoch % config.training.val_interval == 0) or (epoch == config.training.num_epochs)
-        if do_val:
-            val_loss = validate(
-                lens=lens,
-                apply_head_fn=apply_head_fn,
-                val_patch_embs=val_patch_embs,
-                val_img_targets=val_img_targets,
-                val_image_ids=val_image_ids,
-                loss_fn=loss_fn,
-                lens_batch_size=config.training.lens_batch_size,
-            )
-            is_best = val_loss < best_val_loss
-            if is_best:
-                best_val_loss = val_loss
-                lens.save(output_dir / "best_lens.pt")  # type: ignore[union-attr]
-            marker = " *" if is_best else ""
-            epoch_bar.write(
-                f"Epoch {epoch:4d}/{config.training.num_epochs}  "
-                f"train={avg_train_loss:.4f}  val={val_loss:.4f}  "
-                f"lr={current_lr:.2e}{marker}"
-            )
-        else:
-            epoch_bar.write(
-                f"Epoch {epoch:4d}/{config.training.num_epochs}  "
-                f"train={avg_train_loss:.4f}  lr={current_lr:.2e}"
-            )
+        # End-of-epoch validation and logging (only for integer-style val_interval).
+        if intra_epoch_val_indices is None:
+            do_val = (epoch % round(val_interval) == 0) or (epoch == config.training.num_epochs)
+            if do_val:
+                label = f"Epoch {epoch:4d}/{config.training.num_epochs}"
+                _run_validation(avg_train_loss, label)
+            else:
+                epoch_bar.write(
+                    f"Epoch {epoch:4d}/{config.training.num_epochs}  "
+                    f"train={avg_train_loss:.4f}  lr={current_lr:.2e}"
+                )
 
     # ── Save final artifacts ──────────────────────────────────────────────────
     lens.save(output_dir / "final_lens.pt")  # type: ignore[union-attr]
