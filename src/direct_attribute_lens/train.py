@@ -157,7 +157,8 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--num-epochs", type=int, default=None)
     parser.add_argument("--lens-type", choices=["embedding", "direct"], default=None)
-    parser.add_argument("--loss-type", choices=["kld", "ce", "combined"], default=None)
+    parser.add_argument("--loss-type", choices=["kld", "ce", "combined", "best_ce"], default=None)
+    parser.add_argument("--best-fraction", type=float, default=None)
     args = parser.parse_args()
 
     # ── Load and patch config ─────────────────────────────────────────────────
@@ -174,6 +175,8 @@ def main() -> None:
         config.lens.lens_type = args.lens_type
     if args.loss_type is not None:
         config.training.loss_type = args.loss_type
+    if args.best_fraction is not None:
+        config.training.best_fraction = args.best_fraction
 
     torch.manual_seed(config.seed)
     random.seed(config.seed)

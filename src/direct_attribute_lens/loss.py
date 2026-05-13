@@ -34,6 +34,18 @@ def ce_loss(lens_logits: Tensor, target_logits: Tensor) -> Tensor:
     return F.cross_entropy(lens_logits, target_logits.argmax(dim=-1))
 
 
+def best_ce_loss(lens_logits: Tensor, target_logits: Tensor, best_fraction: float = 0.2) -> Tensor:
+    """CE averaged over the best-performing fraction of samples in the batch.
+
+    Computes per-sample CE, selects the `best_fraction` proportion with the
+    lowest loss (best-predicted tokens), and returns their mean.
+    """
+    per_sample = F.cross_entropy(lens_logits, target_logits.argmax(dim=-1), reduction="none")
+    k = max(1, int(len(per_sample) * best_fraction))
+    best_losses, _ = torch.topk(per_sample, k, largest=False, sorted=False)
+    return best_losses.mean()
+
+
 def combined_loss(
     lens_logits: Tensor,
     target_logits: Tensor,
@@ -56,6 +68,14 @@ def get_loss_fn(config: TrainingConfig) -> Callable[[Tensor, Tensor], Tensor]:
             return combined_loss(logits, targets, t, w)
 
         return _combined
+
+    if config.loss_type == "best_ce":
+        frac = config.best_fraction
+
+        def _best_ce(logits: Tensor, targets: Tensor) -> Tensor:
+            return best_ce_loss(logits, targets, frac)
+
+        return _best_ce
 
     # default: kld
     t = config.temperature

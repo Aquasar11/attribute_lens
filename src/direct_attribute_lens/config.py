@@ -77,8 +77,9 @@ class TrainingConfig:
     lr: float = 1e-3
     weight_decay: float = 0.0
     optimizer: str = "adam"        # "adam" | "adamw" | "sgd"
-    loss_type: str = "kld"         # "kld" | "ce" | "combined"
+    loss_type: str = "kld"         # "kld" | "ce" | "combined" | "best_ce"
     ce_weight: float = 0.1         # weight of CE term in combined loss
+    best_fraction: float = 0.2     # fraction of lowest-loss samples used by best_ce loss
     temperature: float = 1.0       # softmax temperature for KLD
     grad_clip_norm: float = 1.0    # 0 to disable
     val_interval: int = 5          # validate every N epochs
