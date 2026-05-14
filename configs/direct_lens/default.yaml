@@ -16,7 +16,7 @@ precompute:
   cache_dir: "outputs/direct_lens/cache"
 
 lens:
-  lens_type: "embedding"    # "embedding" (d_model→d_model) | "direct" (d_model→num_classes)
+  lens_type: "direct"    # "embedding" (d_model→d_model) | "direct" (d_model→num_classes)
   bias: true
 
 training:
@@ -25,7 +25,8 @@ training:
   lr: 1.0e-3
   weight_decay: 0.0
   optimizer: "adam"         # "adam" | "adamw" | "sgd"
-  loss_type: "kld"          # "kld" | "ce" | "combined"
+  loss_type: "best_ce"          # "kld" | "ce" | "combined"
+  best_fraction: 0.3  
   ce_weight: 0.1
   temperature: 1.0
   grad_clip_norm: 1.0
@@ -35,5 +36,5 @@ training:
   scheduler_factor: 0.5     # multiply LR by this on each reduction
   scheduler_min_lr: 1.0e-7  # LR floor
 
-output_dir: "outputs/direct_lens/layer22"
+output_dir: "outputs/direct_lens/layer22_direct_ce_20p"
 seed: 42
