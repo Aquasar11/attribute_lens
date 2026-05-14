@@ -23,8 +23,8 @@ training:
   lens_batch_size: 32768    # tokens per gradient step
   num_epochs: 50
   lr: 1.0e-3
-  weight_decay: 0.0
-  optimizer: "adam"         # "adam" | "adamw" | "sgd"
+  weight_decay: 1.0e-4
+  optimizer: "adamw"         # "adam" | "adamw" | "sgd"
   loss_type: "best_ce"          # "kld" | "ce" | "combined"
   best_fraction: 0.3  
   ce_weight: 0.1
@@ -34,7 +34,7 @@ training:
   scheduler: "plateau"      # "plateau" | "none"
   scheduler_patience: 3     # epochs with no train-loss improvement before reducing LR
   scheduler_factor: 0.5     # multiply LR by this on each reduction
-  scheduler_min_lr: 1.0e-7  # LR floor
+  scheduler_min_lr: 1.0e-5  # LR floor
 
 output_dir: "outputs/direct_lens/layer22_direct_ce_20p"
 seed: 42
