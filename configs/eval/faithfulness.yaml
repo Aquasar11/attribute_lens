@@ -1,0 +1,56 @@
+# Insertion / deletion faithfulness evaluation.
+# Run: python -m eval.faithfulness --config configs/eval/faithfulness.yaml
+
+# --- backbone ---
+model_name: vit_large_patch14_clip_224.openai_ft_in1k
+timm_weights_path: ./model/pretrained_models/vit_large_patch14_clip_224.openai_ft_in1k.pt
+
+# --- which lens to evaluate ---
+#   unified     : single Linear(D,D) per layer; ViT norm+fc_norm+head applied after.
+#   full/low_rank : mapper(D,D) + lens(D, out); out=1024 -> ViT.head, out=1000 -> logits.
+#   direct_lens : single lens for ONE layer (set direct_lens_path/layer).
+mapper_type: unified
+mapper_weights_dir: ./outputs/clip/patch_map_full/best_maps   # full / low_rank
+lens_weights_dir: ./outputs/clip/mlp_kld/best_lenses          # full / low_rank
+unified_weights_dir: ./outputs/unified_lens/v1                # unified
+direct_lens_path: ./direct_lens/layer22_ce/best_lens.pt       # direct_lens
+direct_lens_layer: layer_22
+lens_out_dim: null                                            # full/low_rank: null = auto-detect
+
+# --- which ViT blocks to score ---
+target_layers: ["layer_22"]
+
+# --- data ---
+image_dir: data/first_100
+y_hat_csv: data/first_100/y_hat_baseline.csv
+
+# --- outputs ---
+all_scores_out_file: all_layers_attribution_scores.npz
+all_metrics_out_csv: all_layers_evaluation_metrics.csv
+plots_out_dir: faithfulness_plots
+eval_batch: 128
+
+# --- neighbour-averaging kernel ---
+use_kernel: true
+kernel_approach: ring_sigma          # "ring_sigma" | "multi_kernel"
+kernel_mode: score                   # "score" (smooth attribution) | "embedding" (smooth tokens)
+kernel_size: 7                       # ring_sigma: odd side; KERNEL_SIZE//2 rings
+kernel_sigmas: [2.0, 1.5, 1.0]       # one sigma per ring (closest ring first)
+multi_kernel_sizes: [1, 3, 5, 7]
+multi_kernel_sigmas: [1.0, 1.0, 1.5, 2.0]
+multi_kernel_weights: [1.0, 1.0, 1.0, 1.0]
+
+# --- edge-aware (bilateral) weighting ---
+bilateral: true
+bilateral_sigma_range: 1.0           # range bandwidth as a multiple of mean neighbour dist^2
+
+# --- score space used to rank/smooth (curves always use true P(y_hat)) ---
+score_space: logprob                 # "logprob" | "logit" | "prob"
+
+# --- multi-layer aggregation (fuse all target_layers into one map) ---
+layer_agg: "off"                     # "off" | "uniform" | "confidence" | "ramp"
+layer_norm: rank                     # "rank" | "minmax"
+layer_conf_topk: 5
+layer_conf_gamma: 2.0
+eval_per_layer: false
+agg_layer_name: agg

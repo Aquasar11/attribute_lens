@@ -9,3 +9,7 @@ safetensors
 tensorboard
 pillow
 matplotlib
+scikit-learn
+pandas
+opencv-python
+tqdm

@@ -1,0 +1,44 @@
+# Unified lens v2 -- faithfulness-aware trainer (proxy + del/ins surrogate).
+# Run: python -m train.unified_lens.trainv2 --config configs/train/unified_lens/v2.yaml
+
+# --- supervision / data ---
+mask_source: imagenet_s          # "imagenet_s" | "box"  (selects default data_dir)
+data_dir: null                   # null -> default dir for mask_source; or an explicit path
+save_dir: outputs/unified_lens/v2
+
+# --- model (frozen backbone) ---
+model_name: vit_large_patch14_clip_224.openai_ft_in1k
+model_weights_path: ./model/pretrained_models/vit_large_patch14_clip_224.openai_ft_in1k.pt
+
+# --- which ViT blocks get an affine ---
+layers: [22]
+
+# --- training ---
+# Smaller batch than v1: the faithfulness surrogate backprops through the frozen
+# ViT (memory heavy). Enable grad_checkpoint to trade compute for memory.
+batch_size: 12
+grad_checkpoint: true
+workers: 4
+epochs: 60
+patience: 5
+val_frac: 0.1
+seed: 42
+
+# --- optimizer ---
+lr: 1.0e-4
+wd: 0.01
+grad_clip: 1.0
+
+# --- proxy loss + concentration ---
+temperature: 3.0
+bg_weight: 1.0
+conc_weight: 0.1                 # FG peakedness penalty
+
+# --- faithfulness surrogate ---
+warmup_epochs: 3                 # proxy-only epochs before enabling del/ins surrogate
+faith_weight: 1.0                # 0 = pure proxy (~v1 with CLIP norm + logprob)
+faith_fractions: [0.05, 0.1, 0.2, 0.4]
+faith_samples: 2                 # fractions sampled per step (stochastic AUC estimate)
+faith_beta: 10.0                 # soft keep-mask sharpness (z-scored)
+del_weight: 1.0
+ins_weight: 1.0

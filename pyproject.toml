@@ -21,6 +21,8 @@ dependencies = [
     "matplotlib",
     "scikit-learn",
     "numpy",
+    "pandas",
+    "opencv-python",
     "tqdm",
 ]
 
@@ -28,9 +30,14 @@ dependencies = [
 dev = ["pytest", "ipykernel"]
 
 [project.scripts]
-tuned-lens-train = "tuned_lens.scripts.train:main"
-prepare-imagenet = "tuned_lens.scripts.prepare_imagenet:main"
-attribute-lens-eval = "attribute_lens.evaluate:main"
+tuned-lens-train = "train.tuned_lens.scripts.train:main"
+prepare-imagenet = "train.tuned_lens.scripts.prepare_imagenet:main"
+direct-lens-train = "train.direct_lens.train:main"
+unified-lens-train-v1 = "train.unified_lens.trainv1:main"
+unified-lens-train-v2 = "train.unified_lens.trainv2:main"
+faithfulness-eval = "eval.faithfulness:main"
+localization-eval = "eval.localization:main"
+y-hat-create = "eval.y_hat_creator:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

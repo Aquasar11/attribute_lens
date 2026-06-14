@@ -1,0 +1,25 @@
+# CAAP localization evaluation (Pointing Game, AUPR1, AUPR0).
+# Run: python -m eval.localization --config configs/eval/localization.yaml
+
+# --- backbone ---
+model_name: vit_large_patch14_clip_224.openai_ft_in1k
+timm_weights_path: ./model/pretrained_models/vit_large_patch14_clip_224.openai_ft_in1k.pt
+
+# --- which lens to evaluate (see configs/eval/faithfulness.yaml for mapper_type notes) ---
+mapper_type: unified
+mapper_weights_dir: ./outputs/clip/patch_map_lowrank/best_maps   # full / low_rank
+lens_weights_dir: ./outputs/clip/mlp_kld/best_lenses             # full / low_rank
+unified_weights_dir: ./outputs/unified_lens/v1                   # unified
+direct_lens_path: ./direct_lens/layer22_kld_direct/best_lens.pt  # direct_lens
+direct_lens_layer: layer_22
+lens_out_dim: null
+
+# --- which ViT blocks to score ---
+target_layers: ["layer_22"]
+
+# --- data (annotated images + FG/BG masks) ---
+image_dir: data/validation/annotated_dataset/sample/images
+mask_dir: data/validation/annotated_dataset/sample/masks_fg_bg
+
+# --- output ---
+all_metrics_out_csv: localization_metrics_results.csv

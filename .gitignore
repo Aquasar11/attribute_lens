@@ -1,13 +1,33 @@
+# --- editor / agent / build ---
 .venv/
 venv/
-tmp/
-CLAUDE.md
 __pycache__/
 *.pyc
 *.egg-info/
 dist/
 build/
-*.log
 .ipynb_checkpoints/
+.claude/
+.vscode/
+.idea/
+CLAUDE.md
+
+# --- scratch / logs ---
+tmp/
+*.log
+
+# --- data (large; keep out of git — point configs at these paths) ---
+data/
+data-test/
+model/
+
+# --- training / eval outputs (large) ---
 outputs/
 results/
+new_res/
+direct_lens/
+
+# --- generated eval artifacts ---
+faithfulness_plots*/
+*.npz
+*.csv

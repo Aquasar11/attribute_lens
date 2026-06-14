@@ -1,0 +1,31 @@
+# Unified lens v1 -- proxy-only trainer.
+# Run: python -m train.unified_lens.trainv1 --config configs/train/unified_lens/v1.yaml
+
+# --- supervision / data ---
+mask_source: imagenet_s          # "imagenet_s" | "box"  (selects default data_dir)
+data_dir: null                   # null -> default dir for mask_source; or an explicit path
+save_dir: outputs/unified_lens/v1
+
+# --- model (frozen backbone) ---
+model_name: vit_large_patch14_clip_224.openai_ft_in1k
+model_weights_path: ./model/pretrained_models/vit_large_patch14_clip_224.openai_ft_in1k.pt
+
+# --- which ViT blocks get an affine ---
+layers: [22]
+
+# --- training ---
+batch_size: 64
+workers: 4
+epochs: 30
+patience: 5
+val_frac: 0.1
+seed: 42
+
+# --- optimizer ---
+lr: 1.0e-4
+wd: 0.01
+grad_clip: 1.0
+
+# --- proxy loss ---
+temperature: 3.0
+bg_weight: 1.0
